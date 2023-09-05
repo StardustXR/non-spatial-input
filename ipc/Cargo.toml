@@ -1,0 +1,13 @@
+[package]
+name = "ipc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mint = "0.5.9"
+serde = "1.0.188"
+stardust-xr-schemas = "1.5.1"
+tokio = { version = "1.32.0", default-features = false, features = [
+    "io-std",
+    "io-util",
+] }

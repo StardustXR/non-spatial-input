@@ -1,0 +1,31 @@
+[package]
+name = "stardust-xr-manifold"
+version = "0.2.0"
+edition = "2021"
+authors = ["Nova King <technobaboo@proton.me>"]
+description = "Take input from your 2D desktop and shove it into 3D!"
+license = "MIT"
+repository = "https://github.com/StardustXR/manifold/"
+homepage = "https://stardustxr.org"
+
+[[bin]]
+name = "manifold"
+path = "src/main.rs"
+
+[dependencies]
+xkbcommon = { version = "0.6.0", features = ["x11"] }
+as-raw-xcb-connection = "1.0.0"
+winit = { version = "0.28.3", features = [
+    "mint",
+    "x11",
+], default-features = false }
+softbuffer = "0.3.0"
+input-event-codes = "5.16.8"
+mint = { version = "0.5.9" }
+stardust-xr-schemas = "1.5.1"
+ctrlc = "3.4.1"
+sdfu = { git = "https://github.com/fu5ha/sdfu.git", features = ["glam"] }
+map-range = "0.1.2"
+glam = "0.24.1"
+
+ipc = { path = "../ipc" }

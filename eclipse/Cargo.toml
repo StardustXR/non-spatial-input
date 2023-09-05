@@ -1,0 +1,16 @@
+[package]
+name = "eclipse"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ctrlc = "3.4.1"
+input = "0.8.3"
+input-event-codes = "5.16.8"
+libc = "0.2.147"
+mint = "0.5.9"
+nix = "0.26.2"
+xkbcommon = { version = "0.6.0", default-features = false }
+ipc = { path = "../ipc" }

@@ -1,0 +1,18 @@
+[package]
+name = "azimuth"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+color-eyre = "0.6.2"
+color-rs = "0.8.0"
+glam = "0.24.0"
+input-event-codes = "5.16.8"
+mint = "0.5.9"
+serde = { version = "1.0.163", features = ["serde_derive"] }
+stardust-xr-fusion = { version = "0.43.2", features = ["keymap"] }
+stardust-xr-molecules = { version = "0.28.1" }
+tokio = { version = "1.32.0", features = ["rt", "tokio-macros", "sync"] }
+ipc = { path = "../ipc" }
