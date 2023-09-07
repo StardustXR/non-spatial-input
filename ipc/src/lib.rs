@@ -1,8 +1,8 @@
 #![allow(unused)]
 
+use flexbuffers::FlexbufferSerializer;
 use mint::Vector2;
 use serde::{Deserialize, Serialize};
-use stardust_xr_schemas::flex::{deserialize, serialize};
 use std::{io::Write, vec};
 use tokio::io::AsyncReadExt;
 
@@ -20,7 +20,7 @@ pub enum Message {
 }
 
 pub fn send_input_ipc(message: Message) {
-	let buf = serialize(message).unwrap();
+	let buf = flexbuffers::to_vec(message).unwrap();
 	let mut stdout = std::io::stdout().lock();
 	stdout.write_all(&(buf.len() as u32).to_be_bytes()).unwrap();
 	stdout.write_all(&buf).unwrap();
@@ -31,5 +31,13 @@ pub async fn receive_input_async_ipc() -> std::io::Result<Message> {
 	let length = stdin.read_u32().await?;
 	let mut buf = vec::from_elem(0_u8, length as usize);
 	stdin.read_exact(&mut buf).await?;
-	deserialize(&buf).map_err(|_| std::io::ErrorKind::InvalidData.into())
+	Ok(flexbuffers::from_slice(&buf).unwrap())
+}
+
+#[tokio::test]
+async fn test_loop() {
+	let message = Message::Key {
+		keycode: 25,
+		pressed: true,
+	};
 }

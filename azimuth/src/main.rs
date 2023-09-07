@@ -116,7 +116,6 @@ fn input_loop(
 
 	tokio::task::spawn(async move {
 		while let Ok(message) = receive_input_async_ipc().await {
-			dbg!(&message);
 			match message {
 				ipc::Message::Keymap(keymap) => {
 					let Ok(register_keymap_future) = client.register_keymap(&keymap) else {continue};
