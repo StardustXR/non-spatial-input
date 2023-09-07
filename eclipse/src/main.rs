@@ -46,43 +46,38 @@ fn main() {
 	while poll(&mut [pollfd], -1).is_ok() {
 		input.dispatch().unwrap();
 		for event in &mut input {
-			match event {
-				input::Event::Keyboard(input::event::KeyboardEvent::Key(k)) => {
-					send_input_ipc(Message::Key {
-						keycode: k.key(),
-						pressed: k.key_state() == KeyState::Pressed,
-					})
-				}
-				input::Event::Pointer(PointerEvent::Button(p)) => {
-					send_input_ipc(Message::MouseButton {
-						button: p.button(),
-						pressed: p.button_state() == ButtonState::Pressed,
-					})
-				}
-
+			send_input_ipc(match event {
+				input::Event::Keyboard(input::event::KeyboardEvent::Key(k)) => Message::Key {
+					keycode: k.key(),
+					pressed: k.key_state() == KeyState::Pressed,
+				},
+				input::Event::Pointer(PointerEvent::Button(p)) => Message::MouseButton {
+					button: p.button(),
+					pressed: p.button_state() == ButtonState::Pressed,
+				},
 				input::Event::Pointer(PointerEvent::Motion(m)) => {
-					send_input_ipc(Message::MouseMove([m.dx() as f32, m.dy() as f32].into()))
+					Message::MouseMove([m.dx() as f32, m.dy() as f32].into())
 				}
 				input::Event::Pointer(PointerEvent::ScrollContinuous(s)) => {
-					send_input_ipc(Message::MouseAxisContinuous(
+					Message::MouseAxisContinuous(
 						[
 							s.scroll_value(Axis::Horizontal) as f32,
 							s.scroll_value(Axis::Vertical) as f32,
 						]
 						.into(),
-					))
+					)
 				}
 				input::Event::Pointer(PointerEvent::ScrollWheel(s)) => {
-					send_input_ipc(Message::MouseAxisContinuous(
+					Message::MouseAxisContinuous(
 						[
 							s.scroll_value_v120(Axis::Horizontal) as f32 / 120.0,
 							s.scroll_value_v120(Axis::Vertical) as f32 / 120.0,
 						]
 						.into(),
-					))
+					)
 				}
-				_ => (),
-			}
+				_ => continue,
+			})
 		}
 	}
 }
