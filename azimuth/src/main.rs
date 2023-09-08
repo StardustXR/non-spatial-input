@@ -27,7 +27,7 @@ use tokio::{
 };
 
 // degrees per pixel, constant for now since i'm lazy
-const MOUSE_SENSITIVITY: f32 = 0.1;
+const MOUSE_SENSITIVITY: f32 = 0.05;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PointerDatamap {
@@ -150,9 +150,12 @@ async fn input_loop(
 			}
 			ipc::Message::MouseButton { button, pressed } => {
 				match button {
-					BTN_LEFT!() => pointer_datamap.data.select = if pressed { 1.0 } else { 0.0 },
-					BTN_RIGHT!() => pointer_datamap.data.select = if pressed { 1.0 } else { 0.0 },
-					_ => (),
+					BTN_LEFT!() => pointer_datamap.data().select = if pressed { 1.0 } else { 0.0 },
+					BTN_RIGHT!() => pointer_datamap.data().grab = if pressed { 1.0 } else { 0.0 },
+					b => {
+						println!("Unknown mouse button {b}");
+						continue;
+					}
 				}
 				pointer_datamap.update_input_method(&pointer).unwrap();
 			}

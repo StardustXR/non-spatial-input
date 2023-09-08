@@ -11,7 +11,6 @@ use std::{
 use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-// #[serde(tag = "type")]
 #[serde(tag = "t", content = "c")]
 pub enum Message {
 	Keymap(String),

@@ -13,6 +13,6 @@ input-event-codes = "5.16.8"
 mint = "0.5.9"
 serde = { version = "1.0.163", features = ["serde_derive"] }
 stardust-xr-fusion = { version = "0.43.2", features = ["keymap"] }
-stardust-xr-molecules = { version = "0.28.1" }
+stardust-xr-molecules = { version = "0.29.0" }
 tokio = { version = "1.32.0", features = ["rt", "tokio-macros", "sync"] }
 ipc = { path = "../ipc" }
