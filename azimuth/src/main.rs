@@ -33,14 +33,16 @@ const MOUSE_SENSITIVITY: f32 = 0.01;
 pub struct PointerDatamap {
 	select: f32,
 	grab: f32,
-	scroll: Vector2<f32>,
+	scroll_continuous: Vector2<f32>,
+	scroll_discrete: Vector2<f32>,
 }
 impl Default for PointerDatamap {
 	fn default() -> Self {
 		Self {
 			select: 0.0,
 			grab: 0.0,
-			scroll: [0.0; 2].into(),
+			scroll_continuous: [0.0; 2].into(),
+			scroll_discrete: [0.0; 2].into(),
 		}
 	}
 }
@@ -159,8 +161,14 @@ async fn input_loop(
 				}
 				pointer_datamap.update_input_method(&pointer).unwrap();
 			}
-			ipc::Message::MouseAxisContinuous(_) => todo!(),
-			ipc::Message::MouseAxisDiscrete(_) => todo!(),
+			ipc::Message::MouseAxisContinuous(scroll) => {
+				pointer_datamap.data().scroll_continuous = scroll;
+				pointer_datamap.update_input_method(&pointer).unwrap();
+			}
+			ipc::Message::MouseAxisDiscrete(scroll) => {
+				pointer_datamap.data().scroll_discrete = scroll;
+				pointer_datamap.update_input_method(&pointer).unwrap();
+			}
 			ipc::Message::Disconnect => break,
 		}
 	}
