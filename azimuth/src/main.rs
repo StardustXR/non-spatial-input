@@ -27,7 +27,7 @@ use tokio::{
 };
 
 // degrees per pixel, constant for now since i'm lazy
-const MOUSE_SENSITIVITY: f32 = 0.05;
+const MOUSE_SENSITIVITY: f32 = 0.01;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PointerDatamap {
