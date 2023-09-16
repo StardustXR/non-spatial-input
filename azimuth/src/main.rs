@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe azimuth or eclipse's output into this e.g. `eclipse | azimuth`");
 	}
+	console_subscriber::init();
 	color_eyre::install().unwrap();
 	let (client, event_loop) = Client::connect_with_async_loop()
 		.await
@@ -82,29 +83,24 @@ async fn main() -> Result<()> {
 		hovered_keyboard,
 		pointer.alias(),
 	));
-	let pointer_frame_loop = tokio::task::spawn(pointer_frame_loop(
+	tokio::task::spawn(pointer_frame_loop(
 		frame_notifier.clone(),
 		pointer.alias(),
 		pointer_reticle,
 	));
-	let keyboard_frame_loop = tokio::task::spawn(keyboard_frame_loop(
+	tokio::task::spawn(keyboard_frame_loop(
 		frame_notifier.clone(),
 		pointer.alias(),
 		keyboard_sender.node().alias(),
 		hovered_keyboard_tx,
 	));
 
-	let result = tokio::select! {
+	tokio::select! {
 		biased;
 		_ = tokio::signal::ctrl_c() => Ok(()),
 		e = event_loop => e?.map_err(|e| e.into()),
 		_ = input_loop => Ok(()),
-	};
-
-	pointer_frame_loop.abort();
-	keyboard_frame_loop.abort();
-
-	result
+	}
 }
 
 async fn input_loop(
@@ -181,6 +177,7 @@ async fn pointer_frame_loop(
 ) {
 	loop {
 		frame_notifier.notified().await;
+		println!("Pointer frame");
 		let mut closest_hits: Option<(Vec<InputHandler>, RayMarchResult)> = None;
 		let mut join = JoinSet::new();
 		for handler in pointer.input_handlers().values() {
@@ -226,6 +223,7 @@ async fn keyboard_frame_loop(
 ) {
 	loop {
 		frame_notifier.notified().await;
+		println!("Keyboard frame");
 		let mut closest_hit: Option<(PulseReceiver, RayMarchResult)> = None;
 		let mut join = JoinSet::new();
 		for (receiver, field) in keyboard_sender.receivers().values() {
@@ -248,6 +246,7 @@ async fn keyboard_frame_loop(
 				closest_hit.replace((receiver, ray_info));
 			}
 		}
+		dbg!(&closest_hit);
 		let _ = hovered_keyboard_tx.send(closest_hit.map(|(r, _)| r));
 	}
 }
@@ -255,6 +254,6 @@ async fn keyboard_frame_loop(
 struct FrameNotifier(Arc<Notify>);
 impl RootHandler for FrameNotifier {
 	fn frame(&mut self, _info: FrameInfo) {
-		self.0.notify_one()
+		self.0.notify_waiters();
 	}
 }
