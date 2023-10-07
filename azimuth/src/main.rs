@@ -6,7 +6,7 @@ use ipc::receive_input_async_ipc;
 use mint::Vector2;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
-	client::{Client, FrameInfo, RootHandler},
+	client::{Client, ClientState, FrameInfo, RootHandler},
 	core::values::Transform,
 	data::{PulseReceiver, PulseSender},
 	drawable::Lines,
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe azimuth or eclipse's output into this e.g. `eclipse | azimuth`");
 	}
-	console_subscriber::init();
+	// console_subscriber::init();
 	color_eyre::install().unwrap();
 	let (client, event_loop) = Client::connect_with_async_loop()
 		.await
@@ -246,7 +246,6 @@ async fn keyboard_frame_loop(
 				closest_hit.replace((receiver, ray_info));
 			}
 		}
-		dbg!(&closest_hit);
 		let _ = hovered_keyboard_tx.send(closest_hit.map(|(r, _)| r));
 	}
 }
@@ -255,5 +254,8 @@ struct FrameNotifier(Arc<Notify>);
 impl RootHandler for FrameNotifier {
 	fn frame(&mut self, _info: FrameInfo) {
 		self.0.notify_waiters();
+	}
+	fn save_state(&mut self) -> ClientState {
+		ClientState::default()
 	}
 }
