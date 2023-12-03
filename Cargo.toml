@@ -1,2 +1,2 @@
 [workspace]
-members = ["azimuth", "eclipse", "ipc", "manifold"]
+members = ["azimuth", "eclipse", "ipc", "manifold", "simular"]

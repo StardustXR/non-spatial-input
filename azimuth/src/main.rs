@@ -1,15 +1,20 @@
-use color::rgba;
+pub mod handlers;
+
+use color::rgba_linear;
 use color_eyre::Result;
 use glam::{Quat, Vec3};
-use input_event_codes::{BTN_LEFT, BTN_RIGHT};
+use handlers::{InputHandlerCollector, PulseReceiverCollector};
+use input_event_codes::{BTN_BACK, BTN_LEFT};
 use ipc::receive_input_async_ipc;
 use mint::Vector2;
+use parking_lot::Mutex;
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
 	client::{Client, ClientState, FrameInfo, RootHandler},
 	core::values::Transform,
 	data::{PulseReceiver, PulseSender},
-	drawable::Lines,
+	drawable::{Line, Lines},
 	fields::{Field, RayMarchResult},
 	input::{InputHandler, InputMethod, PointerInputMethod},
 	node::NodeType,
@@ -18,7 +23,6 @@ use stardust_xr_molecules::{
 	datamap::Datamap,
 	keyboard::{KeyboardEvent, KEYBOARD_MASK},
 	lines::{circle, make_line_points},
-	DummyHandler,
 };
 use std::{io::IsTerminal, sync::Arc};
 use tokio::{
@@ -31,18 +35,22 @@ const MOUSE_SENSITIVITY: f32 = 0.01;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PointerDatamap {
+	mouse: (),
 	select: f32,
 	grab: f32,
 	scroll_continuous: Vector2<f32>,
 	scroll_discrete: Vector2<f32>,
+	raw_input_events: Vec<u32>,
 }
 impl Default for PointerDatamap {
 	fn default() -> Self {
 		Self {
+			mouse: (),
 			select: 0.0,
 			grab: 0.0,
 			scroll_continuous: [0.0; 2].into(),
 			scroll_discrete: [0.0; 2].into(),
+			raw_input_events: Vec::new(),
 		}
 	}
 }
@@ -59,19 +67,29 @@ async fn main() -> Result<()> {
 		.expect("Couldn't connect");
 
 	// Pointer stuff
-	let pointer = PointerInputMethod::create(client.get_root(), Transform::identity(), None)?;
-	let _ = pointer.set_position(Some(client.get_hmd()), [0.0; 3]);
-	let line_points = make_line_points(&circle(8, 0.0, 0.001), 0.0025, rgba!(1.0, 1.0, 1.0, 1.0));
+	let pointer = PointerInputMethod::create(client.get_root(), Transform::identity(), None)?
+		.wrap(InputHandlerCollector::default())?;
+	let _ = pointer
+		.node()
+		.set_position(Some(client.get_hmd()), [0.0; 3]);
+	let line_points = make_line_points(
+		&circle(8, 0.0, 0.001),
+		0.0025,
+		rgba_linear!(1.0, 1.0, 1.0, 1.0),
+	);
 	let pointer_reticle = Lines::create(
-		&pointer,
+		pointer.node(),
 		Transform::from_position([0.0, 0.0, -0.5]),
-		&line_points,
-		true,
+		&[Line {
+			points: line_points,
+			cyclic: true,
+		}],
 	)?;
 
 	// Keyboard stuff
 	let keyboard_sender =
-		PulseSender::create(&pointer, Transform::identity(), &KEYBOARD_MASK)?.wrap(DummyHandler)?;
+		PulseSender::create(pointer.node(), Transform::identity(), &KEYBOARD_MASK)?
+			.wrap(PulseReceiverCollector::default())?;
 	let (hovered_keyboard_tx, hovered_keyboard) = watch::channel::<Option<PulseReceiver>>(None);
 
 	let frame_notifier = Arc::new(Notify::new());
@@ -81,17 +99,18 @@ async fn main() -> Result<()> {
 		client.clone(),
 		keyboard_sender.node().alias(),
 		hovered_keyboard,
-		pointer.alias(),
+		pointer.node().alias(),
 	));
 	tokio::task::spawn(pointer_frame_loop(
 		frame_notifier.clone(),
-		pointer.alias(),
+		pointer.node().alias(),
+		pointer.wrapped().clone(),
 		pointer_reticle,
 	));
 	tokio::task::spawn(keyboard_frame_loop(
 		frame_notifier.clone(),
-		pointer.alias(),
-		keyboard_sender.node().alias(),
+		pointer.node().alias(),
+		keyboard_sender.wrapped().clone(),
 		hovered_keyboard_tx,
 	));
 
@@ -107,7 +126,7 @@ async fn input_loop(
 	client: Arc<Client>,
 	keyboard_sender: PulseSender,
 	hovered_keyboard: watch::Receiver<Option<PulseReceiver>>,
-	pointer: InputMethod,
+	pointer: PointerInputMethod,
 ) {
 	let mut keymap_id: Option<String> = None;
 
@@ -115,16 +134,26 @@ async fn input_loop(
 	let mut pitch = 0.0;
 	let mut pointer_datamap = Datamap::create(PointerDatamap::default());
 
+	let mut mouse_buttons = FxHashSet::default();
+
 	while let Ok(message) = receive_input_async_ipc().await {
 		match message {
 			ipc::Message::Keymap(keymap) => {
-				let Ok(register_keymap_future) = client.register_keymap(&keymap) else {continue};
-				let Ok(new_keymap_id) = register_keymap_future.await else {continue};
+				let Ok(register_keymap_future) = client.register_keymap(&keymap) else {
+					continue;
+				};
+				let Ok(new_keymap_id) = register_keymap_future.await else {
+					continue;
+				};
 				keymap_id.replace(new_keymap_id);
 			}
 			ipc::Message::Key { keycode, pressed } => {
-				let Some(hovered_keyboard) = &*hovered_keyboard.borrow() else {continue};
-				let Some(keymap_id) = keymap_id.clone() else {continue};
+				let Some(hovered_keyboard) = &*hovered_keyboard.borrow() else {
+					continue;
+				};
+				let Some(keymap_id) = keymap_id.clone() else {
+					continue;
+				};
 				KeyboardEvent {
 					keyboard: (),
 					xkbv1: (),
@@ -147,9 +176,18 @@ async fn input_loop(
 				let _ = pointer.set_rotation(None, rotation_y * rotation_x);
 			}
 			ipc::Message::MouseButton { button, pressed } => {
+				if pressed {
+					mouse_buttons.insert(button);
+				} else {
+					mouse_buttons.remove(&button);
+				}
 				match button {
-					BTN_LEFT!() => pointer_datamap.data().select = if pressed { 1.0 } else { 0.0 },
-					BTN_RIGHT!() => pointer_datamap.data().grab = if pressed { 1.0 } else { 0.0 },
+					BTN_LEFT!() => {
+						pointer_datamap.data().select = if pressed { 1.0 } else { 0.0 };
+					}
+					BTN_BACK!() => {
+						pointer_datamap.data().grab = if pressed { 1.0 } else { 0.0 };
+					}
 					b => {
 						println!("Unknown mouse button {b}");
 						continue;
@@ -172,7 +210,8 @@ async fn input_loop(
 
 async fn pointer_frame_loop(
 	frame_notifier: Arc<Notify>,
-	pointer: InputMethod,
+	pointer: PointerInputMethod,
+	input_handler_collector: Arc<Mutex<InputHandlerCollector>>,
 	pointer_reticle: Lines,
 ) {
 	loop {
@@ -180,15 +219,21 @@ async fn pointer_frame_loop(
 		println!("Pointer frame");
 		let mut closest_hits: Option<(Vec<InputHandler>, RayMarchResult)> = None;
 		let mut join = JoinSet::new();
-		for handler in pointer.input_handlers().values() {
-			let Some(field) = handler.field() else {continue};
-			let Ok(ray_march_result) = field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]) else {continue};
+		for handler in input_handler_collector.lock().0.values() {
+			let Some(field) = handler.field() else {
+				continue;
+			};
+			let Ok(ray_march_result) = field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]) else {
+				continue;
+			};
 			let handler = handler.alias();
 			join.spawn(async move { (handler, ray_march_result.await) });
 		}
 
 		while let Some(res) = join.join_next().await {
-			let Ok((handler, Ok(ray_info))) = res else {continue};
+			let Ok((handler, Ok(ray_info))) = res else {
+				continue;
+			};
 			if !ray_info.hit() {
 				continue;
 			}
@@ -217,8 +262,8 @@ async fn pointer_frame_loop(
 
 async fn keyboard_frame_loop(
 	frame_notifier: Arc<Notify>,
-	pointer: InputMethod,
-	keyboard_sender: PulseSender,
+	pointer: PointerInputMethod,
+	keyboard_sender: Arc<Mutex<PulseReceiverCollector>>,
 	hovered_keyboard_tx: watch::Sender<Option<PulseReceiver>>,
 ) {
 	loop {
@@ -226,14 +271,18 @@ async fn keyboard_frame_loop(
 		println!("Keyboard frame");
 		let mut closest_hit: Option<(PulseReceiver, RayMarchResult)> = None;
 		let mut join = JoinSet::new();
-		for (receiver, field) in keyboard_sender.receivers().values() {
-			let Ok(ray_march_result) = field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]) else {continue};
+		for (receiver, field) in keyboard_sender.lock().0.values() {
+			let Ok(ray_march_result) = field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]) else {
+				continue;
+			};
 			let receiver = receiver.alias();
 			join.spawn(async move { (receiver, ray_march_result.await) });
 		}
 
 		while let Some(res) = join.join_next().await {
-			let Ok((receiver, Ok(ray_info))) = res else {continue};
+			let Ok((receiver, Ok(ray_info))) = res else {
+				continue;
+			};
 			if !ray_info.hit() || ray_info.deepest_point_distance <= 0.001 {
 				continue;
 			}

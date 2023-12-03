@@ -1,5 +1,5 @@
 [package]
-name = "azimuth"
+name = "simular"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,16 +7,14 @@ edition = "2021"
 
 [dependencies]
 color-eyre = "0.6.2"
-color-rs = "0.8.0"
 glam = "0.24.0"
-input-event-codes = "5.16.8"
 mint = "0.5.9"
 serde = { version = "1.0.163", features = ["serde_derive"] }
 tokio = { version = "1.32.0", features = ["rt", "tokio-macros", "sync"] }
 ipc = { path = "../ipc" }
 console-subscriber = "0.2.0"
-rustc-hash = "1.1.0"
 parking_lot = "0.12.1"
+rustc-hash = "1.1.0"
 
 [dependencies.stardust-xr-fusion]
 features = ["keymap"]

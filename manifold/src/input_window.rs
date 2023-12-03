@@ -165,11 +165,9 @@ impl InputWindow {
 		} else {
 			let button = match button {
 				MouseButton::Left => input_event_codes::BTN_LEFT!(),
-				MouseButton::Right => input_event_codes::BTN_RIGHT!(),
 				MouseButton::Middle => input_event_codes::BTN_MIDDLE!(),
-				MouseButton::Other(_) => {
-					return;
-				}
+				MouseButton::Right => input_event_codes::BTN_RIGHT!(),
+				MouseButton::Other(b) => b as u32,
 			};
 			send_input_ipc(Message::MouseButton {
 				button,
