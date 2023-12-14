@@ -119,13 +119,13 @@ impl InputWindow {
 		let delta = mouse_position - window_center;
 		let motion_vector = Line::new(window_center, window_center + (delta * 4.0), 10.0);
 
-		for x in 0..512 {
-			for y in 0..512 {
+		for x in 0..window_size.width {
+			for y in 0..window_size.height {
 				let dist = motion_vector.dist(vec2(x as f32, y as f32));
 				let intensity = dist.map_range(0.5..-0.5, 0.0..1.0).clamp(0.0, 1.0);
 				let intensity_u8 = (intensity * 255.0) as u32;
 				// let intensity_u8 = 255;
-				buffer[(x + (y * 512)) as usize] =
+				buffer[(x + (y * window_size.width)) as usize] =
 					intensity_u8 | (intensity_u8 << 8) | (intensity_u8 << 16);
 			}
 		}
