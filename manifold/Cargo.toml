@@ -13,7 +13,7 @@ name = "manifold"
 path = "src/main.rs"
 
 [dependencies]
-xkbcommon = { version = "0.6.0", features = ["x11"] }
+xkbcommon = { version = "0.7.0", features = ["x11"] }
 as-raw-xcb-connection = "1.0.0"
 winit = { version = "0.28.3", features = [
     "mint",
@@ -26,6 +26,6 @@ stardust-xr-schemas = "1.5.1"
 ctrlc = "3.4.1"
 sdfu = { git = "https://github.com/fu5ha/sdfu.git", features = ["glam"] }
 map-range = "0.1.2"
-glam = "0.24.1"
+glam = "0.24.2"
 
 ipc = { path = "../ipc" }

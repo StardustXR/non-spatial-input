@@ -1,2 +1,19 @@
 [workspace]
 members = ["azimuth", "eclipse", "ipc", "manifold", "simular"]
+
+[workspace.dependencies]
+serde = { version = "1.0.163", features = ["serde_derive"] }
+tokio = { version = "1.32.0", features = [
+    "rt-multi-thread",
+    "tokio-macros",
+    "sync",
+] }
+
+[workspace.dependencies.stardust-xr-fusion]
+features = ["keymap"]
+git = "https://github.com/StardustXR/core.git"
+# path = "../../core/fusion"
+
+[workspace.dependencies.stardust-xr-molecules]
+git = "https://github.com/StardustXR/molecules.git"
+# path = "../../molecules"

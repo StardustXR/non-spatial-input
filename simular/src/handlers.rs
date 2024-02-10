@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
 use stardust_xr_fusion::{
-	data::{NewReceiverInfo, PulseReceiver, PulseSenderHandler},
+	data::{PulseReceiver, PulseSenderHandler},
 	fields::UnknownField,
 	input::{InputHandler, InputMethodHandler},
 };
@@ -8,16 +8,11 @@ use stardust_xr_fusion::{
 #[derive(Debug, Default)]
 pub struct PulseReceiverCollector(pub FxHashMap<String, (PulseReceiver, UnknownField)>);
 impl PulseSenderHandler for PulseReceiverCollector {
-	fn new_receiver(
-		&mut self,
-		info: NewReceiverInfo,
-		receiver: PulseReceiver,
-		field: UnknownField,
-	) {
-		self.0.insert(info.uid, (receiver, field));
+	fn new_receiver(&mut self, uid: String, receiver: PulseReceiver, field: UnknownField) {
+		self.0.insert(uid, (receiver, field));
 	}
-	fn drop_receiver(&mut self, uid: &str) {
-		self.0.remove(uid);
+	fn drop_receiver(&mut self, uid: String) {
+		self.0.remove(&uid);
 	}
 }
 

@@ -110,7 +110,9 @@ impl InputWindow {
 			.unwrap();
 		let mut buffer = self.surface.buffer_mut().unwrap();
 
-		let Some(mouse_position) = self.cursor_position else {return};
+		let Some(mouse_position) = self.cursor_position else {
+			return;
+		};
 		let window_center = vec2(
 			window_size.width as f32 / 2.0,
 			window_size.height as f32 / 2.0,

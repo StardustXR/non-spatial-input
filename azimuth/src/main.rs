@@ -12,16 +12,16 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
 	client::{Client, ClientState, FrameInfo, RootHandler},
-	core::values::Transform,
-	data::{PulseReceiver, PulseSender},
+	core::values::Datamap,
+	data::{PulseReceiver, PulseSender, PulseSenderAspect},
 	drawable::{Line, Lines},
-	fields::{Field, RayMarchResult},
-	input::{InputHandler, InputMethod, PointerInputMethod},
+	fields::{FieldAspect, RayMarchResult},
+	input::{InputHandler, InputMethodAspect, PointerInputMethod},
 	node::NodeType,
+	spatial::{SpatialAspect, Transform},
 	HandlerWrapper,
 };
 use stardust_xr_molecules::{
-	datamap::Datamap,
 	keyboard::{KeyboardEvent, KEYBOARD_MASK},
 	lines::{circle, make_line_points},
 };
@@ -70,19 +70,23 @@ async fn main() -> Result<()> {
 		.expect("Couldn't connect");
 
 	// Pointer stuff
-	let pointer = PointerInputMethod::create(client.get_root(), Transform::identity(), None)?
-		.wrap(InputHandlerCollector::default())?;
+	let pointer = PointerInputMethod::create(
+		client.get_root(),
+		Transform::identity(),
+		Datamap::from_typed(PointerDatamap::default())?,
+	)?
+	.wrap(InputHandlerCollector::default())?;
 	let _ = pointer
 		.node()
-		.set_position(Some(client.get_hmd()), [0.0; 3]);
+		.set_relative_transform(client.get_hmd(), Transform::from_translation([0.0; 3]));
 	let line_points = make_line_points(
-		&circle(8, 0.0, 0.001),
+		circle(8, 0.0, 0.001),
 		0.0025,
 		rgba_linear!(1.0, 1.0, 1.0, 1.0),
 	);
 	let pointer_reticle = Lines::create(
-		pointer.node(),
-		Transform::from_position([0.0, 0.0, -0.5]),
+		pointer.node().as_ref(),
+		Transform::from_translation([0.0, 0.0, -0.5]),
 		&[Line {
 			points: line_points,
 			cyclic: true,
@@ -90,9 +94,12 @@ async fn main() -> Result<()> {
 	)?;
 
 	// Keyboard stuff
-	let keyboard_sender =
-		PulseSender::create(pointer.node(), Transform::identity(), &KEYBOARD_MASK)?
-			.wrap(PulseReceiverCollector::default())?;
+	let keyboard_sender = PulseSender::create(
+		pointer.node().as_ref(),
+		Transform::identity(),
+		&KEYBOARD_MASK,
+	)?
+	.wrap(PulseReceiverCollector::default())?;
 	let (hovered_keyboard_tx, hovered_keyboard) = watch::channel::<Option<PulseReceiver>>(None);
 	let (frame_count_tx, frame_count_rx) = watch::channel(0);
 
@@ -133,7 +140,7 @@ async fn input_loop(
 	let mut pitch = 0.0;
 
 	let mut mouse_buttons = FxHashSet::default();
-	let mut pointer_datamap = Datamap::create(PointerDatamap::default());
+	let mut pointer_datamap = PointerDatamap::default();
 	let mut old_frame_count = 0_u32;
 	// let mut past_time = Instant::now();
 
@@ -142,8 +149,8 @@ async fn input_loop(
 		let _span_enter = span.enter();
 		if *frame_count_rx.borrow() > old_frame_count {
 			old_frame_count = *frame_count_rx.borrow();
-			pointer_datamap.data().scroll_continuous = [0.0; 2].into();
-			pointer_datamap.data().scroll_discrete = [0.0; 2].into();
+			pointer_datamap.scroll_continuous = [0.0; 2].into();
+			pointer_datamap.scroll_discrete = [0.0; 2].into();
 		}
 		// println!(
 		// 	"time since last event: {}",
@@ -153,10 +160,10 @@ async fn input_loop(
 		match message {
 			ipc::Message::Keymap(keymap) => {
 				info!("IPC keymap message");
-				let Ok(register_keymap_future) = client.register_keymap(&keymap) else {
+				let Ok(future) = client.register_xkb_keymap(keymap) else {
 					continue;
 				};
-				let Ok(new_keymap_id) = register_keymap_future.await else {
+				let Ok(new_keymap_id) = future.await else {
 					continue;
 				};
 				keymap_id.replace(new_keymap_id);
@@ -177,7 +184,9 @@ async fn input_loop(
 						keycode as i32
 					} else {
 						-(keycode as i32)
-					}],
+					}]
+					.into_iter()
+					.collect(),
 				}
 				.send_event(&keyboard_sender, &[hovered_keyboard])
 			}
@@ -189,7 +198,8 @@ async fn input_loop(
 
 				let rotation_x = Quat::from_rotation_x(-pitch.to_radians());
 				let rotation_y = Quat::from_rotation_y(-yaw.to_radians());
-				let _ = pointer.set_rotation(None, rotation_y * rotation_x);
+				let _ =
+					pointer.set_local_transform(Transform::from_rotation(rotation_y * rotation_x));
 			}
 			ipc::Message::MouseButton { button, pressed } => {
 				info!("IPC mouse button message");
@@ -200,14 +210,14 @@ async fn input_loop(
 						mouse_buttons.remove(&button);
 					}
 				}
-				pointer_datamap.data().raw_input_events = mouse_buttons.clone();
+				pointer_datamap.raw_input_events = mouse_buttons.clone();
 				match button {
 					BTN_LEFT!() => {
-						pointer_datamap.data().select = if pressed { 1.0 } else { 0.0 };
+						pointer_datamap.select = if pressed { 1.0 } else { 0.0 };
 					}
 					8..=9 => {
 						// idk why this number but that's what it spits out for side mousebuttons lol
-						pointer_datamap.data().grab = if pressed { 1.0 } else { 0.0 };
+						pointer_datamap.grab = if pressed { 1.0 } else { 0.0 };
 						dbg!("holding right mouse button");
 					}
 					b => {
@@ -215,24 +225,30 @@ async fn input_loop(
 						continue;
 					}
 				}
-				pointer_datamap.update_input_method(&pointer).unwrap();
+				pointer
+					.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap())
+					.unwrap();
 			}
 			ipc::Message::MouseAxisContinuous(scroll) => {
 				info!("IPC mouse axis continuous message");
-				let scroll_continuous = &mut pointer_datamap.data().scroll_continuous;
+				let scroll_continuous = &mut pointer_datamap.scroll_continuous;
 				*scroll_continuous = [
 					scroll_continuous.x + scroll.x,
 					scroll_continuous.y + scroll.y,
 				]
 				.into();
-				pointer_datamap.update_input_method(&pointer).unwrap();
+				pointer
+					.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap())
+					.unwrap();
 			}
 			ipc::Message::MouseAxisDiscrete(scroll) => {
 				info!("IPC mouse axis discrete message");
-				let scroll_discrete = &mut pointer_datamap.data().scroll_discrete;
+				let scroll_discrete = &mut pointer_datamap.scroll_discrete;
 				*scroll_discrete =
 					[scroll_discrete.x + scroll.x, scroll_discrete.y + scroll.y].into();
-				pointer_datamap.update_input_method(&pointer).unwrap();
+				pointer
+					.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap())
+					.unwrap();
 			}
 			ipc::Message::Disconnect => break,
 		}
@@ -251,18 +267,22 @@ fn update_pointer(
 		let Some(field) = handler.field() else {
 			continue;
 		};
-		let Ok(ray_march_result) = field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]) else {
-			continue;
-		};
 		let handler = handler.alias();
-		join.spawn(async move { (handler, ray_march_result.await) });
+		let field = field.alias();
+		let pointer = pointer.alias();
+		join.spawn(async move {
+			(
+				handler,
+				field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]).await,
+			)
+		});
 	}
 	tokio::spawn(async move {
 		while let Some(res) = join.join_next().await {
 			let Ok((handler, Ok(ray_info))) = res else {
 				continue;
 			};
-			if !ray_info.hit() {
+			if ray_info.min_distance > 0.0 {
 				continue;
 			}
 			if let Some((hit_handlers, hit_info)) = &mut closest_hits {
@@ -279,11 +299,19 @@ fn update_pointer(
 
 		if let Some((hit_handlers, hit_info)) = closest_hits {
 			let _ = pointer.set_handler_order(hit_handlers.iter().collect::<Vec<_>>().as_slice());
-			let _ = pointer_reticle
-				.set_position(Some(&pointer), Vec3::from(hit_info.deepest_point()) * 0.95);
+			let _ = pointer_reticle.set_relative_transform(
+				&pointer,
+				Transform::from_translation(
+					Vec3::from(hit_info.ray_origin)
+						+ Vec3::from(hit_info.ray_direction)
+							* hit_info.deepest_point_distance
+							* 0.95,
+				),
+			);
 		} else {
 			let _ = pointer.set_handler_order(&[]);
-			let _ = pointer_reticle.set_position(Some(&pointer), [0.0, 0.0, -0.5]);
+			let _ = pointer_reticle
+				.set_relative_transform(&pointer, Transform::from_translation([0.0, 0.0, -0.5]));
 		}
 	});
 }
@@ -297,18 +325,22 @@ fn reconnect_keyboard(
 	let mut closest_hit: Option<(PulseReceiver, RayMarchResult)> = None;
 	let mut join = JoinSet::new();
 	for (receiver, field) in keyboard_sender.lock().0.values() {
-		let Ok(ray_march_result) = field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]) else {
-			continue;
-		};
+		let field = field.alias();
+		let pointer = pointer.alias();
 		let receiver = receiver.alias();
-		join.spawn(async move { (receiver, ray_march_result.await) });
+		join.spawn(async move {
+			(
+				receiver,
+				field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]).await,
+			)
+		});
 	}
 	tokio::task::spawn(async move {
 		while let Some(res) = join.join_next().await {
 			let Ok((receiver, Ok(ray_info))) = res else {
 				continue;
 			};
-			if !ray_info.hit() || ray_info.deepest_point_distance <= 0.001 {
+			if ray_info.min_distance > 0.0 || ray_info.deepest_point_distance <= 0.001 {
 				continue;
 			}
 			if let Some((hit_receiver, hit_info)) = &mut closest_hit {

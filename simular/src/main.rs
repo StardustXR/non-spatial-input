@@ -5,13 +5,14 @@ use handlers::PulseReceiverCollector;
 use ipc::receive_input_async_ipc;
 use mint::Vector2;
 use parking_lot::Mutex;
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
 	client::{Client, ClientState, FrameInfo, RootHandler},
-	core::values::Transform,
-	data::{PulseReceiver, PulseSender},
-	fields::{Field, RayMarchResult},
+	data::{PulseReceiver, PulseSender, PulseSenderAspect},
+	fields::{FieldAspect, RayMarchResult},
 	node::NodeType,
+	spatial::Transform,
 };
 use stardust_xr_molecules::{
 	keyboard::{KeyboardEvent, KEYBOARD_MASK},
@@ -102,14 +103,18 @@ async fn input_loop(
 	hovered_mouse: watch::Receiver<Option<PulseReceiver>>,
 ) {
 	let mut keymap_id: Option<String> = None;
+	let mut mouse_state = MouseEvent {
+		raw_input_events: Some(FxHashSet::default()),
+		..Default::default()
+	};
 
 	while let Ok(message) = receive_input_async_ipc().await {
 		match message {
 			ipc::Message::Keymap(keymap) => {
-				let Ok(register_keymap_future) = client.register_keymap(&keymap) else {
+				let Ok(future) = client.register_xkb_keymap(keymap) else {
 					continue;
 				};
-				let Ok(new_keymap_id) = register_keymap_future.await else {
+				let Ok(new_keymap_id) = future.await else {
 					continue;
 				};
 				keymap_id.replace(new_keymap_id);
@@ -129,7 +134,9 @@ async fn input_loop(
 						keycode as i32
 					} else {
 						-(keycode as i32)
-					}],
+					}]
+					.into_iter()
+					.collect(),
 				}
 				.send_event(&keyboard_sender, &[hovered_keyboard])
 			}
@@ -147,16 +154,13 @@ async fn input_loop(
 				let Some(hovered_mouse) = &*hovered_mouse.borrow() else {
 					continue;
 				};
+				let raw_input_events = mouse_state.raw_input_events.as_mut().unwrap();
 				if pressed {
-					MouseEvent {
-						buttons_down: Some(vec![button]),
-						..Default::default()
-					}
+					raw_input_events.insert(button);
+					&mouse_state
 				} else {
-					MouseEvent {
-						buttons_up: Some(vec![button]),
-						..Default::default()
-					}
+					raw_input_events.remove(&button);
+					&mouse_state
 				}
 				.send_event(&mouse_sender, &[hovered_mouse])
 			}
@@ -193,7 +197,6 @@ async fn pointer_frame_loop(
 ) {
 	loop {
 		frame_notifier.notified().await;
-		println!("Pointer frame");
 		detect_hover(&client, mouse_sender.clone(), &hovered_mouse_tx).await
 	}
 }
@@ -206,7 +209,6 @@ async fn keyboard_frame_loop(
 ) {
 	loop {
 		frame_notifier.notified().await;
-		println!("Keyboard frame");
 		detect_hover(&client, keyboard_sender.clone(), &hovered_keyboard_tx).await
 	}
 }
@@ -219,19 +221,22 @@ async fn detect_hover(
 	let mut closest_hit: Option<(PulseReceiver, RayMarchResult)> = None;
 	let mut join = JoinSet::new();
 	for (receiver, field) in sender.lock().0.values() {
-		let Ok(ray_march_result) = field.ray_march(&client.get_hmd(), [0.0; 3], [0.0, 0.0, -1.0])
-		else {
-			continue;
-		};
 		let receiver = receiver.alias();
-		join.spawn(async move { (receiver, ray_march_result.await) });
+		let field = field.alias();
+		let hmd = client.get_hmd().alias();
+		join.spawn(async move {
+			(
+				receiver,
+				field.ray_march(&hmd, [0.0; 3], [0.0, 0.0, -1.0]).await,
+			)
+		});
 	}
 
 	while let Some(res) = join.join_next().await {
 		let Ok((receiver, Ok(ray_info))) = res else {
 			continue;
 		};
-		if !ray_info.hit() || ray_info.deepest_point_distance <= 0.001 {
+		if ray_info.min_distance > 0.0 || ray_info.deepest_point_distance <= 0.001 {
 			continue;
 		}
 		if let Some((hit_receiver, hit_info)) = &mut closest_hit {
