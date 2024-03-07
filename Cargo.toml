@@ -1,5 +1,5 @@
 [workspace]
-members = ["azimuth", "eclipse", "ipc", "manifold", "simular"]
+members = ["azimuth", "display", "eclipse", "ipc", "manifold", "simular"]
 
 [workspace.dependencies]
 serde = { version = "1.0.163", features = ["serde_derive"] }

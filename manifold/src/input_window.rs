@@ -1,12 +1,13 @@
-use std::{num::NonZeroU32, process::exit};
-
-use as_raw_xcb_connection::{xcb_connection_t, ValidConnection};
-use glam::vec2;
+use eclipse::StateChange;
+use glam::{vec2, Vec2};
 use ipc::{send_input_ipc, Message};
 use map_range::MapRange;
-use mint::Vector2;
-use sdfu::{Line, SDF};
 use softbuffer::{Context, Surface};
+use std::{
+	num::NonZeroU32,
+	process::exit,
+	sync::mpsc::{self, Sender},
+};
 use winit::{
 	dpi::{LogicalPosition, PhysicalPosition, Size},
 	event::{
@@ -14,15 +15,16 @@ use winit::{
 		VirtualKeyCode, WindowEvent,
 	},
 	event_loop::EventLoop,
-	platform::x11::WindowExtX11,
 	window::{CursorGrabMode, Window, WindowBuilder},
 };
-use xkbcommon::xkb::{
-	self,
-	ffi::XKB_KEYMAP_FORMAT_TEXT_V1,
-	x11::{get_core_keyboard_device_id, keymap_new_from_device},
-	Keymap, KEYMAP_COMPILE_NO_FLAGS,
-};
+
+fn line_dist(p: Vec2, l1: Vec2, l2: Vec2, thickness: f32) -> f32 {
+	let pa = p - l1;
+	let ba = l2 - l1;
+	let t = pa.dot(ba) / ba.dot(ba);
+	let h = t.clamp(0.0, 1.0);
+	(pa - (ba * h)).length() - thickness
+}
 
 pub struct InputWindow {
 	window: Window,
@@ -30,6 +32,7 @@ pub struct InputWindow {
 	cursor_position: Option<LogicalPosition<u32>>,
 	grabbed: bool,
 	modifiers: ModifiersState,
+	input_loop_tx: Sender<StateChange>,
 }
 impl InputWindow {
 	pub fn new(event_loop: &EventLoop<()>) -> Self {
@@ -43,21 +46,8 @@ impl InputWindow {
 			.build(event_loop)
 			.unwrap();
 
-		let keymap = match window.xcb_connection() {
-			Some(raw_conn) => {
-				let connection = unsafe { ValidConnection::new(raw_conn as *mut xcb_connection_t) };
-				keymap_new_from_device(
-					&xkb::Context::new(0),
-					&connection,
-					get_core_keyboard_device_id(&connection),
-					KEYMAP_COMPILE_NO_FLAGS,
-				)
-			}
-			None => Keymap::new_from_names(&xkb::Context::new(0), "", "", "", "", None, 0).unwrap(),
-		};
-		send_input_ipc(Message::Keymap(
-			keymap.get_as_string(XKB_KEYMAP_FORMAT_TEXT_V1),
-		));
+		let (input_loop_tx, rx) = mpsc::channel();
+		std::thread::spawn(move || eclipse::input_loop(false, rx));
 
 		let surface = unsafe { Surface::new(&Context::new(&window).unwrap(), &window) }.unwrap();
 
@@ -67,6 +57,7 @@ impl InputWindow {
 			cursor_position: None,
 			grabbed: true,
 			modifiers: ModifiersState::empty(),
+			input_loop_tx,
 		};
 		input_window.set_grab(false);
 		input_window
@@ -89,10 +80,12 @@ impl InputWindow {
 			WindowEvent::ModifiersChanged(state) => self.modifiers = state,
 
 			WindowEvent::Destroyed => {
+				self.input_loop_tx.send(StateChange::Stop).unwrap();
 				send_input_ipc(Message::Disconnect);
 				exit(0);
 			}
 			WindowEvent::CloseRequested => {
+				self.input_loop_tx.send(StateChange::Stop).unwrap();
 				send_input_ipc(Message::Disconnect);
 				exit(0);
 			}
@@ -119,11 +112,13 @@ impl InputWindow {
 		);
 		let mouse_position = vec2(mouse_position.x as f32, mouse_position.y as f32);
 		let delta = mouse_position - window_center;
-		let motion_vector = Line::new(window_center, window_center + (delta * 4.0), 10.0);
+		let l1 = window_center;
+		let l2 = window_center + (delta * 4.0);
+		let thickness = 10.0;
 
 		for x in 0..window_size.width {
 			for y in 0..window_size.height {
-				let dist = motion_vector.dist(vec2(x as f32, y as f32));
+				let dist = line_dist(vec2(x as f32, y as f32), l1, l2, thickness);
 				let intensity = dist.map_range(0.5..-0.5, 0.0..1.0).clamp(0.0, 1.0);
 				let intensity_u8 = (intensity * 255.0) as u32;
 				// let intensity_u8 = 255;
@@ -144,16 +139,16 @@ impl InputWindow {
 		if self.grabbed {
 			self.window.request_redraw();
 			let window_size = self.window.inner_size();
-			let cursor_position = position.to_logical::<f64>(self.window.scale_factor());
+			// let cursor_position = position.to_logical::<f64>(self.window.scale_factor());
 			let center_position = LogicalPosition::new(
 				window_size.width as f64 / 2.0,
 				window_size.height as f64 / 2.0,
 			);
-			let cursor_delta = Vector2::from_slice(&[
-				(cursor_position.x - center_position.x) as f32,
-				(cursor_position.y - center_position.y) as f32,
-			]);
-			send_input_ipc(Message::MouseMove(cursor_delta));
+			// let cursor_delta = Vector2::from_slice(&[
+			// 	(cursor_position.x - center_position.x) as f32,
+			// 	(cursor_position.y - center_position.y) as f32,
+			// ]);
+			// send_input_ipc(Message::MouseMove(cursor_delta));
 
 			self.window.set_cursor_position(center_position).unwrap();
 		}
@@ -164,31 +159,32 @@ impl InputWindow {
 			if state == ElementState::Released && button == MouseButton::Left {
 				self.set_grab(true);
 			}
-		} else {
-			let button = match button {
-				MouseButton::Left => input_event_codes::BTN_LEFT!(),
-				MouseButton::Middle => input_event_codes::BTN_MIDDLE!(),
-				MouseButton::Right => input_event_codes::BTN_RIGHT!(),
-				MouseButton::Other(b) => b as u32,
-			};
-			send_input_ipc(Message::MouseButton {
-				button,
-				pressed: state == ElementState::Pressed,
-			});
 		}
+		//  else {
+		// 	let button = match button {
+		// 		MouseButton::Left => input_event_codes::BTN_LEFT!(),
+		// 		MouseButton::Middle => input_event_codes::BTN_MIDDLE!(),
+		// 		MouseButton::Right => input_event_codes::BTN_RIGHT!(),
+		// 		MouseButton::Other(b) => b as u32,
+		// 	};
+		// 	send_input_ipc(Message::MouseButton {
+		// 		button,
+		// 		pressed: state == ElementState::Pressed,
+		// 	});
+		// }
 	}
 
 	fn handle_axis(&mut self, delta: MouseScrollDelta) {
-		if self.grabbed {
-			send_input_ipc(match delta {
-				MouseScrollDelta::LineDelta(right, down) => {
-					Message::MouseAxisDiscrete([right, down].into())
-				}
-				MouseScrollDelta::PixelDelta(offset) => {
-					Message::MouseAxisContinuous([-offset.x as f32, -offset.y as f32].into())
-				}
-			});
-		}
+		// if self.grabbed {
+		// 	send_input_ipc(match delta {
+		// 		MouseScrollDelta::LineDelta(right, down) => {
+		// 			Message::MouseAxisDiscrete([right, down].into())
+		// 		}
+		// 		MouseScrollDelta::PixelDelta(offset) => {
+		// 			Message::MouseAxisContinuous([-offset.x as f32, -offset.y as f32].into())
+		// 		}
+		// 	});
+		// }
 	}
 
 	fn handle_keyboard_input(&mut self, input: KeyboardInput) {
@@ -197,12 +193,13 @@ impl InputWindow {
 			&& self.modifiers.ctrl()
 		{
 			self.set_grab(false);
-		} else {
-			send_input_ipc(Message::Key {
-				keycode: input.scancode,
-				pressed: input.state == ElementState::Pressed,
-			});
 		}
+		// else {
+		// 	send_input_ipc(Message::Key {
+		// 		keycode: input.scancode,
+		// 		pressed: input.state == ElementState::Pressed,
+		// 	});
+		// }
 	}
 
 	const GRABBED_WINDOW_TITLE: &'static str = "Manifold Input (ctrl+esc to release cursor)";
@@ -212,6 +209,12 @@ impl InputWindow {
 			return;
 		}
 		self.grabbed = grab;
+
+		if grab {
+			self.input_loop_tx.send(StateChange::Enable).unwrap();
+		} else {
+			self.input_loop_tx.send(StateChange::Disable).unwrap();
+		}
 
 		self.window.set_cursor_visible(!grab);
 		if grab {

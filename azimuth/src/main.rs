@@ -14,16 +14,16 @@ use stardust_xr_fusion::{
 	client::{Client, ClientState, FrameInfo, RootHandler},
 	core::values::Datamap,
 	data::{PulseReceiver, PulseSender, PulseSenderAspect},
-	drawable::{Line, Lines},
+	drawable::Lines,
 	fields::{FieldAspect, RayMarchResult},
 	input::{InputHandler, InputMethodAspect, PointerInputMethod},
 	node::NodeType,
-	spatial::{SpatialAspect, Transform},
+	spatial::{Spatial, SpatialAspect, Transform},
 	HandlerWrapper,
 };
 use stardust_xr_molecules::{
 	keyboard::{KeyboardEvent, KEYBOARD_MASK},
-	lines::{circle, make_line_points},
+	lines::{circle, LineExt},
 };
 use std::{io::IsTerminal, sync::Arc};
 use tokio::{sync::watch, task::JoinSet};
@@ -79,18 +79,14 @@ async fn main() -> Result<()> {
 	let _ = pointer
 		.node()
 		.set_relative_transform(client.get_hmd(), Transform::from_translation([0.0; 3]));
-	let line_points = make_line_points(
-		circle(8, 0.0, 0.001),
-		0.0025,
-		rgba_linear!(1.0, 1.0, 1.0, 1.0),
-	);
+
+	let line = circle(8, 0.0, 0.001)
+		.thickness(0.0025)
+		.color(rgba_linear!(1.0, 1.0, 1.0, 1.0));
 	let pointer_reticle = Lines::create(
 		pointer.node().as_ref(),
 		Transform::from_translation([0.0, 0.0, -0.5]),
-		&[Line {
-			points: line_points,
-			cyclic: true,
-		}],
+		&[line],
 	)?;
 
 	// Keyboard stuff
@@ -112,6 +108,7 @@ async fn main() -> Result<()> {
 		frame_count_rx,
 	));
 	let _client_root = client.wrap_root(Root {
+		root: client.get_root().alias(),
 		pointer,
 		pointer_reticle,
 		keyboard_sender,
@@ -357,6 +354,7 @@ fn reconnect_keyboard(
 }
 
 struct Root {
+	root: Spatial,
 	pointer: HandlerWrapper<PointerInputMethod, InputHandlerCollector>,
 	pointer_reticle: Lines,
 	keyboard_sender: HandlerWrapper<PulseSender, PulseReceiverCollector>,
@@ -378,6 +376,6 @@ impl RootHandler for Root {
 		);
 	}
 	fn save_state(&mut self) -> ClientState {
-		ClientState::default()
+		ClientState::from_root(&self.root)
 	}
 }

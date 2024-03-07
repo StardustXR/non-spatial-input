@@ -12,7 +12,7 @@ use stardust_xr_fusion::{
 	data::{PulseReceiver, PulseSender, PulseSenderAspect},
 	fields::{FieldAspect, RayMarchResult},
 	node::NodeType,
-	spatial::Transform,
+	spatial::{Spatial, Transform},
 };
 use stardust_xr_molecules::{
 	keyboard::{KeyboardEvent, KEYBOARD_MASK},
@@ -65,7 +65,10 @@ async fn main() -> Result<()> {
 	let (hovered_keyboard_tx, hovered_keyboard) = watch::channel::<Option<PulseReceiver>>(None);
 
 	let frame_notifier = Arc::new(Notify::new());
-	let _client_root = client.wrap_root(FrameNotifier(frame_notifier.clone()))?;
+	let _client_root = client.wrap_root(FrameNotifier(
+		frame_notifier.clone(),
+		client.get_root().alias(),
+	))?;
 
 	let input_loop = tokio::task::spawn(input_loop(
 		client.clone(),
@@ -251,12 +254,12 @@ async fn detect_hover(
 	let _ = hovered_tx.send(closest_hit.map(|(r, _)| r));
 }
 
-struct FrameNotifier(Arc<Notify>);
+struct FrameNotifier(Arc<Notify>, Spatial);
 impl RootHandler for FrameNotifier {
 	fn frame(&mut self, _info: FrameInfo) {
 		self.0.notify_waiters();
 	}
 	fn save_state(&mut self) -> ClientState {
-		ClientState::default()
+		ClientState::from_root(&self.1)
 	}
 }
