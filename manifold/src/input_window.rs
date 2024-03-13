@@ -11,8 +11,8 @@ use std::{
 use winit::{
 	dpi::{LogicalPosition, PhysicalPosition, Size},
 	event::{
-		ElementState, Event, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta,
-		VirtualKeyCode, WindowEvent,
+		ElementState, Event, KeyboardInput, ModifiersState, MouseButton, VirtualKeyCode,
+		WindowEvent,
 	},
 	event_loop::EventLoop,
 	window::{CursorGrabMode, Window, WindowBuilder},
@@ -74,18 +74,28 @@ impl InputWindow {
 	fn handle_window_event(&mut self, event: WindowEvent) {
 		match event {
 			WindowEvent::MouseInput { state, button, .. } => self.handle_mouse_input(state, button),
-			WindowEvent::MouseWheel { delta, .. } => self.handle_axis(delta),
 			WindowEvent::CursorMoved { position, .. } => self.handle_mouse_move(position),
 			WindowEvent::KeyboardInput { input, .. } => self.handle_keyboard_input(input),
 			WindowEvent::ModifiersChanged(state) => self.modifiers = state,
 
+			WindowEvent::CursorEntered { .. } => {
+				send_input_ipc(Message::ResetInput);
+				self.input_loop_tx.send(StateChange::Enable).unwrap();
+			}
+			WindowEvent::CursorLeft { .. } => {
+				self.input_loop_tx.send(StateChange::Disable).unwrap();
+				send_input_ipc(Message::ResetInput);
+			}
+
 			WindowEvent::Destroyed => {
 				self.input_loop_tx.send(StateChange::Stop).unwrap();
+				send_input_ipc(Message::ResetInput);
 				send_input_ipc(Message::Disconnect);
 				exit(0);
 			}
 			WindowEvent::CloseRequested => {
 				self.input_loop_tx.send(StateChange::Stop).unwrap();
+				send_input_ipc(Message::ResetInput);
 				send_input_ipc(Message::Disconnect);
 				exit(0);
 			}
@@ -139,17 +149,10 @@ impl InputWindow {
 		if self.grabbed {
 			self.window.request_redraw();
 			let window_size = self.window.inner_size();
-			// let cursor_position = position.to_logical::<f64>(self.window.scale_factor());
 			let center_position = LogicalPosition::new(
 				window_size.width as f64 / 2.0,
 				window_size.height as f64 / 2.0,
 			);
-			// let cursor_delta = Vector2::from_slice(&[
-			// 	(cursor_position.x - center_position.x) as f32,
-			// 	(cursor_position.y - center_position.y) as f32,
-			// ]);
-			// send_input_ipc(Message::MouseMove(cursor_delta));
-
 			self.window.set_cursor_position(center_position).unwrap();
 		}
 	}
@@ -160,61 +163,24 @@ impl InputWindow {
 				self.set_grab(true);
 			}
 		}
-		//  else {
-		// 	let button = match button {
-		// 		MouseButton::Left => input_event_codes::BTN_LEFT!(),
-		// 		MouseButton::Middle => input_event_codes::BTN_MIDDLE!(),
-		// 		MouseButton::Right => input_event_codes::BTN_RIGHT!(),
-		// 		MouseButton::Other(b) => b as u32,
-		// 	};
-		// 	send_input_ipc(Message::MouseButton {
-		// 		button,
-		// 		pressed: state == ElementState::Pressed,
-		// 	});
-		// }
-	}
-
-	fn handle_axis(&mut self, delta: MouseScrollDelta) {
-		// if self.grabbed {
-		// 	send_input_ipc(match delta {
-		// 		MouseScrollDelta::LineDelta(right, down) => {
-		// 			Message::MouseAxisDiscrete([right, down].into())
-		// 		}
-		// 		MouseScrollDelta::PixelDelta(offset) => {
-		// 			Message::MouseAxisContinuous([-offset.x as f32, -offset.y as f32].into())
-		// 		}
-		// 	});
-		// }
 	}
 
 	fn handle_keyboard_input(&mut self, input: KeyboardInput) {
-		if input.virtual_keycode == Some(VirtualKeyCode::Escape)
+		if input.virtual_keycode == Some(VirtualKeyCode::Z)
 			&& input.state == ElementState::Released
-			&& self.modifiers.ctrl()
+			&& self.modifiers.logo()
 		{
 			self.set_grab(false);
 		}
-		// else {
-		// 	send_input_ipc(Message::Key {
-		// 		keycode: input.scancode,
-		// 		pressed: input.state == ElementState::Pressed,
-		// 	});
-		// }
 	}
 
-	const GRABBED_WINDOW_TITLE: &'static str = "Manifold Input (ctrl+esc to release cursor)";
+	const GRABBED_WINDOW_TITLE: &'static str = "Manifold Input (super+z to release cursor)";
 	const UNGRABBED_WINDOW_TITLE: &'static str = "Manifold Input (click to grab input)";
 	fn set_grab(&mut self, grab: bool) {
 		if grab == self.grabbed {
 			return;
 		}
 		self.grabbed = grab;
-
-		if grab {
-			self.input_loop_tx.send(StateChange::Enable).unwrap();
-		} else {
-			self.input_loop_tx.send(StateChange::Disable).unwrap();
-		}
 
 		self.window.set_cursor_visible(!grab);
 		if grab {

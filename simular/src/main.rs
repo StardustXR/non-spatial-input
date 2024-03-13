@@ -9,7 +9,10 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
 	client::{Client, ClientState, FrameInfo, RootHandler},
-	data::{PulseReceiver, PulseSender, PulseSenderAspect},
+	data::{
+		xkb::{KEY_Meta_L, KEY_Meta_R},
+		PulseReceiver, PulseSender, PulseSenderAspect,
+	},
 	fields::{FieldAspect, RayMarchResult},
 	node::NodeType,
 	spatial::{Spatial, Transform},
@@ -123,12 +126,15 @@ async fn input_loop(
 				keymap_id.replace(new_keymap_id);
 			}
 			ipc::Message::Key { keycode, pressed } => {
+				if keycode == KEY_Meta_L || keycode == KEY_Meta_R {}
+
 				let Some(hovered_keyboard) = &*hovered_keyboard.borrow() else {
 					continue;
 				};
 				let Some(keymap_id) = keymap_id.clone() else {
 					continue;
 				};
+
 				KeyboardEvent {
 					keyboard: (),
 					xkbv1: (),
@@ -187,6 +193,7 @@ async fn input_loop(
 				}
 				.send_event(&mouse_sender, &[hovered_mouse])
 			}
+			ipc::Message::ResetInput => (),
 			ipc::Message::Disconnect => break,
 		}
 	}

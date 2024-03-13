@@ -1076,6 +1076,7 @@ version = "0.1.0"
 dependencies = [
  "flexbuffers",
  "mint",
+ "rustc-hash",
  "serde",
  "tokio",
 ]
@@ -2080,6 +2081,7 @@ dependencies = [
  "color-eyre",
  "console-subscriber",
  "glam 0.25.0",
+ "input-event-codes",
  "ipc",
  "mint",
  "parking_lot 0.12.1",

@@ -25,7 +25,7 @@ use stardust_xr_molecules::{
 	keyboard::{KeyboardEvent, KEYBOARD_MASK},
 	lines::{circle, LineExt},
 };
-use std::{io::IsTerminal, sync::Arc};
+use std::{io::IsTerminal, sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinSet};
 use tracing::{info, info_span, instrument};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -107,12 +107,15 @@ async fn main() -> Result<()> {
 		hovered_keyboard,
 		frame_count_rx,
 	));
+	tokio::spawn(reconnect_keyboard_loop(
+		pointer.node().alias(),
+		keyboard_sender.wrapped().clone(),
+		hovered_keyboard_tx,
+	));
 	let _client_root = client.wrap_root(Root {
 		root: client.get_root().alias(),
 		pointer,
 		pointer_reticle,
-		keyboard_sender,
-		hovered_keyboard_tx: Arc::new(hovered_keyboard_tx),
 		frame_count_tx,
 	})?;
 
@@ -247,8 +250,50 @@ async fn input_loop(
 					.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap())
 					.unwrap();
 			}
+			ipc::Message::ResetInput => (),
 			ipc::Message::Disconnect => break,
 		}
+	}
+}
+
+#[instrument]
+async fn reconnect_keyboard_loop(
+	pointer: PointerInputMethod,
+	keyboard_sender: Arc<Mutex<PulseReceiverCollector>>,
+	hovered_keyboard_tx: watch::Sender<Option<PulseReceiver>>,
+) {
+	loop {
+		let mut closest_hit: Option<(PulseReceiver, RayMarchResult)> = None;
+		let mut join = JoinSet::new();
+		for (receiver, field) in keyboard_sender.lock().0.values() {
+			let field = field.alias();
+			let pointer = pointer.alias();
+			let receiver = receiver.alias();
+			join.spawn(async move {
+				(
+					receiver,
+					field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]).await,
+				)
+			});
+		}
+		while let Some(res) = join.join_next().await {
+			let Ok((receiver, Ok(ray_info))) = res else {
+				continue;
+			};
+			if ray_info.min_distance > 0.0 || ray_info.deepest_point_distance <= 0.001 {
+				continue;
+			}
+			if let Some((hit_receiver, hit_info)) = &mut closest_hit {
+				if ray_info.deepest_point_distance < hit_info.deepest_point_distance {
+					*hit_receiver = receiver;
+					*hit_info = ray_info;
+				}
+			} else {
+				closest_hit.replace((receiver, ray_info));
+			}
+		}
+		let _ = hovered_keyboard_tx.send(closest_hit.map(|(r, _)| r));
+		tokio::time::sleep(Duration::from_secs_f64(0.1)).await
 	}
 }
 
@@ -313,52 +358,10 @@ fn update_pointer(
 	});
 }
 
-#[instrument]
-fn reconnect_keyboard(
-	pointer: PointerInputMethod,
-	keyboard_sender: Arc<Mutex<PulseReceiverCollector>>,
-	hovered_keyboard_tx: Arc<watch::Sender<Option<PulseReceiver>>>,
-) {
-	let mut closest_hit: Option<(PulseReceiver, RayMarchResult)> = None;
-	let mut join = JoinSet::new();
-	for (receiver, field) in keyboard_sender.lock().0.values() {
-		let field = field.alias();
-		let pointer = pointer.alias();
-		let receiver = receiver.alias();
-		join.spawn(async move {
-			(
-				receiver,
-				field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]).await,
-			)
-		});
-	}
-	tokio::task::spawn(async move {
-		while let Some(res) = join.join_next().await {
-			let Ok((receiver, Ok(ray_info))) = res else {
-				continue;
-			};
-			if ray_info.min_distance > 0.0 || ray_info.deepest_point_distance <= 0.001 {
-				continue;
-			}
-			if let Some((hit_receiver, hit_info)) = &mut closest_hit {
-				if ray_info.deepest_point_distance < hit_info.deepest_point_distance {
-					*hit_receiver = receiver;
-					*hit_info = ray_info;
-				}
-			} else {
-				closest_hit.replace((receiver, ray_info));
-			}
-		}
-		let _ = hovered_keyboard_tx.send(closest_hit.map(|(r, _)| r));
-	});
-}
-
 struct Root {
 	root: Spatial,
 	pointer: HandlerWrapper<PointerInputMethod, InputHandlerCollector>,
 	pointer_reticle: Lines,
-	keyboard_sender: HandlerWrapper<PulseSender, PulseReceiverCollector>,
-	hovered_keyboard_tx: Arc<watch::Sender<Option<PulseReceiver>>>,
 	frame_count_tx: watch::Sender<u32>,
 }
 impl RootHandler for Root {
@@ -368,11 +371,6 @@ impl RootHandler for Root {
 			self.pointer.node().alias(),
 			self.pointer.wrapped().clone(),
 			self.pointer_reticle.alias(),
-		);
-		reconnect_keyboard(
-			self.pointer.node().alias(),
-			self.keyboard_sender.wrapped().clone(),
-			self.hovered_keyboard_tx.clone(),
 		);
 	}
 	fn save_state(&mut self) -> ClientState {

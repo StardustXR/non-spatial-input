@@ -13,6 +13,7 @@ ipc = { path = "../ipc" }
 console-subscriber = "0.2.0"
 parking_lot = "0.12.1"
 rustc-hash = "1.1.0"
+input-event-codes = "5.16.8"
 
 tokio = { workspace = true }
 serde = { workspace = true }
