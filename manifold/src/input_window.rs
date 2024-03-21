@@ -1,26 +1,20 @@
-use eclipse::StateChange;
 use glam::{vec2, Vec2};
 use ipc::{send_input_ipc, Message};
 use map_range::MapRange;
-use softbuffer::{Context, Surface};
-use std::{
-	iter::repeat_with,
-	num::NonZeroU32,
-	process::exit,
-	rc::Rc,
-	sync::mpsc::{self, Sender},
-};
+use softbuffer::Surface;
+use std::{num::NonZeroU32, process::exit, rc::Rc};
 use winit::{
-	dpi::{LogicalPosition, PhysicalPosition, Size},
+	dpi::{LogicalPosition, Size},
 	event::{
 		DeviceEvent, ElementState, Event, KeyEvent, Modifiers, MouseButton, MouseScrollDelta,
 		WindowEvent,
 	},
 	event_loop::{EventLoop, EventLoopWindowTarget},
-	keyboard::{Key, KeyCode, ModifiersKeyState, NativeKey, PhysicalKey},
+	keyboard::Key,
 	platform::scancode::PhysicalKeyExtScancode,
 	window::{CursorGrabMode, Window, WindowBuilder},
 };
+use xkbcommon::xkb::{Keymap, KEYMAP_FORMAT_TEXT_V1};
 
 fn line_dist(p: Vec2, l1: Vec2, l2: Vec2, thickness: f32) -> f32 {
 	let pa = p - l1;
@@ -36,7 +30,6 @@ pub struct InputWindow {
 	mouse_delta: Option<LogicalPosition<f64>>,
 	grabbed: bool,
 	modifiers: Modifiers,
-	input_loop_tx: Sender<StateChange>,
 }
 impl InputWindow {
 	pub fn new(event_loop: &EventLoop<()>) -> Self {
@@ -45,12 +38,9 @@ impl InputWindow {
 			WindowBuilder::new()
 				.with_title("Manifold")
 				.with_min_inner_size(size)
-				.build(&event_loop)
+				.build(event_loop)
 				.unwrap(),
 		);
-
-		let (input_loop_tx, rx) = mpsc::channel();
-		std::thread::spawn(move || eclipse::input_loop(false, rx));
 
 		let context = softbuffer::Context::new(window.clone()).unwrap();
 		let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
@@ -61,8 +51,21 @@ impl InputWindow {
 			mouse_delta: None,
 			grabbed: true,
 			modifiers: Modifiers::default(),
-			input_loop_tx,
 		};
+
+		let keymap = Keymap::new_from_names(
+			&xkbcommon::xkb::Context::new(0),
+			"evdev",
+			"",
+			"",
+			"",
+			None,
+			0,
+		)
+		.unwrap()
+		.get_as_string(KEYMAP_FORMAT_TEXT_V1);
+		send_input_ipc(Message::Keymap(keymap));
+
 		input_window.set_grab(false);
 		input_window
 	}
@@ -80,21 +83,6 @@ impl InputWindow {
 			} => {
 				self.handle_mouse_delta(delta);
 			}
-			// Doesn't seem to do anything, at least on wayland
-			// Event::DeviceEvent {
-			// 	event: DeviceEvent::MouseWheel { delta },
-			// 	..
-			// } => {
-			// 	dbg!(delta);
-			// 	match delta {
-			// 		MouseScrollDelta::LineDelta(x, y) => {
-			// 			send_input_ipc(Message::MouseAxisContinuous(vec2(x, y).into()))
-			// 		}
-			// 		MouseScrollDelta::PixelDelta(p) => send_input_ipc(Message::MouseAxisDiscrete(
-			// 			vec2(p.x as f32, p.y as f32).into(),
-			// 		)),
-			// 	}
-			// }
 			Event::AboutToWait => {
 				self.redraw();
 			}
@@ -126,21 +114,17 @@ impl InputWindow {
 			WindowEvent::ModifiersChanged(state) => self.modifiers = state,
 			WindowEvent::CursorEntered { .. } => {
 				send_input_ipc(Message::ResetInput);
-				self.input_loop_tx.send(StateChange::Enable).unwrap();
 			}
 			WindowEvent::CursorLeft { .. } => {
-				self.input_loop_tx.send(StateChange::Disable).unwrap();
 				send_input_ipc(Message::ResetInput);
 			}
 
 			WindowEvent::Destroyed => {
-				self.input_loop_tx.send(StateChange::Stop).unwrap();
 				send_input_ipc(Message::ResetInput);
 				send_input_ipc(Message::Disconnect);
 				exit(0);
 			}
 			WindowEvent::CloseRequested => {
-				self.input_loop_tx.send(StateChange::Stop).unwrap();
 				send_input_ipc(Message::ResetInput);
 				send_input_ipc(Message::Disconnect);
 				exit(0);
@@ -219,7 +203,6 @@ impl InputWindow {
 		let pressed = input.state == ElementState::Pressed;
 
 		let Some(keycode) = input.physical_key.to_scancode() else {
-			dbg!(":(");
 			return;
 		};
 		send_input_ipc(Message::Key { keycode, pressed });

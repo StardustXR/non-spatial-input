@@ -2387,7 +2387,6 @@ name = "stardust-xr-manifold"
 version = "0.2.0"
 dependencies = [
  "ctrlc",
- "eclipse",
  "glam 0.25.0",
  "input-event-codes",
  "ipc",

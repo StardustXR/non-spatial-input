@@ -23,5 +23,4 @@ ctrlc = "3.4.1"
 map-range = "0.1.2"
 glam = "0.25.0"
 
-eclipse = { path = "../eclipse" }
 ipc = { path = "../ipc" }
