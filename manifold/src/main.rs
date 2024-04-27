@@ -3,7 +3,7 @@ use std::{io::IsTerminal, process::exit};
 use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoopBuilder;
 pub mod input_window;
-
+pub mod wayland;
 fn main() {
 	if std::io::stdout().is_terminal() {
 		panic!("You need to pipe this into an input sink e.g. `manifold | azimuth`");

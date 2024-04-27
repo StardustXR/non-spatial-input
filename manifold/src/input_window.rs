@@ -1,17 +1,35 @@
+use as_raw_xcb_connection::{xcb_connection_t, ValidConnection};
 use glam::{vec2, Vec2};
 use ipc::{send_input_ipc, Message};
 use map_range::MapRange;
 use softbuffer::Surface;
-use std::{num::NonZeroU32, process::exit, rc::Rc};
+use std::process::exit;
+use std::{num::NonZeroU32, rc::Rc};
+use wayland_client::{
+	backend::Backend,
+	globals::registry_queue_init,
+	protocol::wl_seat,
+};
+use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::{
-	dpi::{LogicalPosition, Size}, event::{
+	dpi::{LogicalPosition, Size},
+	event::{
 		DeviceEvent, ElementState, Event, KeyEvent, Modifiers, MouseButton, MouseScrollDelta,
 		WindowEvent,
-	}, event_loop::{EventLoop, EventLoopWindowTarget}, keyboard::Key, platform::scancode::PhysicalKeyExtScancode, raw_window_handle::XcbDisplayHandle, window::{CursorGrabMode, Window, WindowBuilder}
+	},
+	event_loop::{EventLoop, EventLoopWindowTarget},
+	keyboard::Key,
+	platform::scancode::PhysicalKeyExtScancode,
+	raw_window_handle::{WaylandDisplayHandle, XcbDisplayHandle},
+	window::{CursorGrabMode, Window, WindowBuilder},
 };
-use as_raw_xcb_connection::{xcb_connection_t, ValidConnection};
-use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
-use xkbcommon::xkb::{ffi::XKB_KEYMAP_FORMAT_TEXT_V1, x11::{get_core_keyboard_device_id, keymap_new_from_device}, Keymap, KEYMAP_COMPILE_NO_FLAGS, KEYMAP_FORMAT_TEXT_V1};
+use xkbcommon::xkb::{
+	ffi::XKB_KEYMAP_FORMAT_TEXT_V1,
+	x11::{get_core_keyboard_device_id, keymap_new_from_device},
+	Keymap, KEYMAP_COMPILE_NO_FLAGS, KEYMAP_FORMAT_TEXT_V1,
+};
+
+use crate::wayland::WlHandler;
 
 fn line_dist(p: Vec2, l1: Vec2, l2: Vec2, thickness: f32) -> f32 {
 	let pa = p - l1;
@@ -40,18 +58,42 @@ impl InputWindow {
 		);
 
 		let xcb_context = xkbcommon::xkb::Context::new(0);
-		let keymap = match window.display_handle().map(|handle| handle.as_raw()) {	
-			Ok(RawDisplayHandle::Xcb(XcbDisplayHandle{connection: Some(conn), ..})) => unsafe { 
+		let keymap = match window.display_handle().map(|handle| handle.as_raw()) {
+			Ok(RawDisplayHandle::Wayland(WaylandDisplayHandle { display, .. })) => unsafe {
+				let backend = Backend::from_foreign_display(
+					display.as_ptr() as *mut wayland_sys::client::wl_display
+				);
+				let conn = wayland_client::Connection::from_backend(backend);
+				let (globals, mut queue) = registry_queue_init::<WlHandler>(&conn).unwrap();
+				let qh = queue.handle();
+				let _seat: wl_seat::WlSeat = globals.bind(&qh, 7..=8, ()).unwrap();
+				let mut wl_handler = WlHandler { keymap: None };
+				eprintln!("Waiting for keymap from compositor");
+				while wl_handler.keymap.is_none() {
+					queue.roundtrip(&mut wl_handler).unwrap();
+				}
+				Keymap::new_from_string(
+					&xcb_context,
+					String::from_utf8(wl_handler.keymap.unwrap()).unwrap(),
+					KEYMAP_FORMAT_TEXT_V1,
+					KEYMAP_COMPILE_NO_FLAGS,
+				)
+				.unwrap()
+			},
+			Ok(RawDisplayHandle::Xcb(XcbDisplayHandle {
+				connection: Some(conn),
+				..
+			})) => unsafe {
 				keymap_new_from_device(
-				&xcb_context,
-				ValidConnection::new(conn.as_ptr() as *mut xcb_connection_t),
-				get_core_keyboard_device_id(ValidConnection::new(
-					conn.as_ptr() as *mut xcb_connection_t,
-				) ),
-				KEYMAP_COMPILE_NO_FLAGS,
-				)},
-			_ => {
-				Keymap::new_from_names(&xcb_context, "", "", "", "", None, 0).unwrap()},
+					&xcb_context,
+					ValidConnection::new(conn.as_ptr() as *mut xcb_connection_t),
+					get_core_keyboard_device_id(ValidConnection::new(
+						conn.as_ptr() as *mut xcb_connection_t
+					)),
+					KEYMAP_COMPILE_NO_FLAGS,
+				)
+			},
+			_ => Keymap::new_from_names(&xcb_context, "", "", "", "", None, 0).unwrap(),
 		};
 		send_input_ipc(Message::Keymap(
 			keymap.get_as_string(XKB_KEYMAP_FORMAT_TEXT_V1),
