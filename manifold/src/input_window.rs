@@ -110,19 +110,6 @@ impl InputWindow {
 			modifiers: Modifiers::default(),
 		};
 
-		let keymap = Keymap::new_from_names(
-			&xkbcommon::xkb::Context::new(0),
-			"evdev",
-			"",
-			"",
-			"",
-			None,
-			0,
-		)
-		.unwrap()
-		.get_as_string(KEYMAP_FORMAT_TEXT_V1);
-		send_input_ipc(Message::Keymap(keymap));
-
 		input_window.set_grab(false);
 		input_window
 	}
