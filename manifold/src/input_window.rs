@@ -4,17 +4,14 @@ use map_range::MapRange;
 use softbuffer::Surface;
 use std::{num::NonZeroU32, process::exit, rc::Rc};
 use winit::{
-	dpi::{LogicalPosition, Size},
-	event::{
+	dpi::{LogicalPosition, Size}, event::{
 		DeviceEvent, ElementState, Event, KeyEvent, Modifiers, MouseButton, MouseScrollDelta,
 		WindowEvent,
-	},
-	event_loop::{EventLoop, EventLoopWindowTarget},
-	keyboard::Key,
-	platform::scancode::PhysicalKeyExtScancode,
-	window::{CursorGrabMode, Window, WindowBuilder},
+	}, event_loop::{EventLoop, EventLoopWindowTarget}, keyboard::Key, platform::scancode::PhysicalKeyExtScancode, raw_window_handle::XcbDisplayHandle, window::{CursorGrabMode, Window, WindowBuilder}
 };
-use xkbcommon::xkb::{Keymap, KEYMAP_FORMAT_TEXT_V1};
+use as_raw_xcb_connection::{xcb_connection_t, ValidConnection};
+use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+use xkbcommon::xkb::{ffi::XKB_KEYMAP_FORMAT_TEXT_V1, x11::{get_core_keyboard_device_id, keymap_new_from_device}, Keymap, KEYMAP_COMPILE_NO_FLAGS, KEYMAP_FORMAT_TEXT_V1};
 
 fn line_dist(p: Vec2, l1: Vec2, l2: Vec2, thickness: f32) -> f32 {
 	let pa = p - l1;
@@ -41,6 +38,24 @@ impl InputWindow {
 				.build(event_loop)
 				.unwrap(),
 		);
+
+		let xcb_context = xkbcommon::xkb::Context::new(0);
+		let keymap = match window.display_handle().map(|handle| handle.as_raw()) {	
+			Ok(RawDisplayHandle::Xcb(XcbDisplayHandle{connection: Some(conn), ..})) => unsafe { 
+				keymap_new_from_device(
+				&xcb_context,
+				ValidConnection::new(conn.as_ptr() as *mut xcb_connection_t),
+				get_core_keyboard_device_id(ValidConnection::new(
+					conn.as_ptr() as *mut xcb_connection_t,
+				) ),
+				KEYMAP_COMPILE_NO_FLAGS,
+				)},
+			_ => {
+				Keymap::new_from_names(&xcb_context, "", "", "", "", None, 0).unwrap()},
+		};
+		send_input_ipc(Message::Keymap(
+			keymap.get_as_string(XKB_KEYMAP_FORMAT_TEXT_V1),
+		));
 
 		let context = softbuffer::Context::new(window.clone()).unwrap();
 		let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
@@ -179,11 +194,11 @@ impl InputWindow {
 			return;
 		}
 		let btn_id = match button {
-			MouseButton::Left => 272,
-			MouseButton::Right => 273,
-			MouseButton::Middle => todo!(),
-			MouseButton::Back => todo!(),
-			MouseButton::Forward => todo!(),
+			MouseButton::Left => input_event_codes::BTN_LEFT!(),
+			MouseButton::Right => input_event_codes::BTN_RIGHT!(),
+			MouseButton::Middle => input_event_codes::BTN_MIDDLE!(),
+			MouseButton::Back => input_event_codes::BTN_BACK!(),
+			MouseButton::Forward => input_event_codes::BTN_FORWARD!(),
 			MouseButton::Other(n) => n,
 		};
 		send_input_ipc(Message::MouseButton {
