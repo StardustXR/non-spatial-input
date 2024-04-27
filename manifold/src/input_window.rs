@@ -162,7 +162,11 @@ impl InputWindow {
 			)
 			.unwrap();
 		let mut buffer = self.surface.buffer_mut().unwrap();
-
+		if delta.x == 0.0 && delta.y == 0.0 {
+			buffer.fill(0);
+			buffer.present().unwrap();
+			return;
+		}
 		let delta = vec2(delta.x as f32, delta.y as f32);
 		let window_center = vec2(
 			window_size.width as f32 / 2.0,
