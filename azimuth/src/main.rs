@@ -16,7 +16,7 @@ use stardust_xr_fusion::{
 	data::{PulseReceiver, PulseSender, PulseSenderAspect},
 	drawable::Lines,
 	fields::{FieldAspect, RayMarchResult},
-	input::{InputHandler, InputMethodAspect, PointerInputMethod},
+	input::{InputDataType, InputHandler, InputMethod, InputMethodAspect, Pointer},
 	node::NodeType,
 	spatial::{Spatial, SpatialAspect, Transform},
 	HandlerWrapper,
@@ -28,7 +28,6 @@ use stardust_xr_molecules::{
 use std::{io::IsTerminal, sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinSet};
 use tracing::{info, info_span, instrument};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // degrees per pixel, constant for now since i'm lazy
 const MOUSE_SENSITIVITY: f32 = 0.01;
@@ -62,18 +61,20 @@ async fn main() -> Result<()> {
 	}
 	// console_subscriber::init();
 	color_eyre::install().unwrap();
-	tracing_subscriber::registry()
-		.with(tracing_tracy::TracyLayer::new())
-		.init();
 	let (client, event_loop) = Client::connect_with_async_loop()
 		.await
 		.expect("Couldn't connect");
 
 	// Pointer stuff
-	let pointer = PointerInputMethod::create(
+	let pointer = InputMethod::create(
 		client.get_root(),
 		Transform::identity(),
-		Datamap::from_typed(PointerDatamap::default())?,
+		InputDataType::Pointer(Pointer {
+			origin: [0.0; 3].into(),
+			orientation: Quat::IDENTITY.into(),
+			deepest_point: [0.0; 3].into(),
+		}),
+		&Datamap::from_typed(PointerDatamap::default())?,
 	)?
 	.wrap(InputHandlerCollector::default())?;
 	let _ = pointer
@@ -129,7 +130,7 @@ async fn main() -> Result<()> {
 
 async fn input_loop(
 	client: Arc<Client>,
-	pointer: PointerInputMethod,
+	pointer: InputMethod,
 	keyboard_sender: PulseSender,
 	hovered_keyboard: watch::Receiver<Option<PulseReceiver>>,
 	frame_count_rx: watch::Receiver<u32>,
@@ -258,7 +259,7 @@ async fn input_loop(
 
 #[instrument]
 async fn reconnect_keyboard_loop(
-	pointer: PointerInputMethod,
+	pointer: InputMethod,
 	keyboard_sender: Arc<Mutex<PulseReceiverCollector>>,
 	hovered_keyboard_tx: watch::Sender<Option<PulseReceiver>>,
 ) {
@@ -299,16 +300,13 @@ async fn reconnect_keyboard_loop(
 
 #[instrument]
 fn update_pointer(
-	pointer: PointerInputMethod,
+	pointer: InputMethod,
 	input_handler_collector: Arc<Mutex<InputHandlerCollector>>,
 	pointer_reticle: Lines,
 ) {
 	let mut closest_hits: Option<(Vec<InputHandler>, RayMarchResult)> = None;
 	let mut join = JoinSet::new();
-	for handler in input_handler_collector.lock().0.values() {
-		let Some(field) = handler.field() else {
-			continue;
-		};
+	for (handler, field) in input_handler_collector.lock().0.values() {
 		let handler = handler.alias();
 		let field = field.alias();
 		let pointer = pointer.alias();
@@ -340,7 +338,7 @@ fn update_pointer(
 		}
 
 		if let Some((hit_handlers, hit_info)) = closest_hits {
-			let _ = pointer.set_handler_order(hit_handlers.iter().collect::<Vec<_>>().as_slice());
+			let _ = pointer.set_handler_order(hit_handlers.as_slice());
 			let _ = pointer_reticle.set_relative_transform(
 				&pointer,
 				Transform::from_translation(
@@ -360,7 +358,7 @@ fn update_pointer(
 
 struct Root {
 	root: Spatial,
-	pointer: HandlerWrapper<PointerInputMethod, InputHandlerCollector>,
+	pointer: HandlerWrapper<InputMethod, InputHandlerCollector>,
 	pointer_reticle: Lines,
 	frame_count_tx: watch::Sender<u32>,
 }
