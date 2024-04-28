@@ -191,21 +191,35 @@ impl InputWindow {
 			)
 			.unwrap();
 		let mut buffer = self.surface.buffer_mut().unwrap();
-		if delta.x == 0.0 && delta.y == 0.0 {
-			buffer.fill(0);
-			buffer.present().unwrap();
-			return;
-		}
+
 		let delta = vec2(delta.x as f32, delta.y as f32);
 		let window_center = vec2(
 			window_size.width as f32 / 2.0,
 			window_size.height as f32 / 2.0,
 		);
 
-		let l1 = window_center;
-		let l2 = window_center + (delta * 4.0);
 		let thickness = 10.0;
 
+		if delta.x == 0.0 && delta.y == 0.0 {
+			buffer.fill(0);
+			//Draw a dot in the center
+			let color = match self.grabbed {
+				true => 0x00FF00,
+				false => 0xFF0000,
+			};
+			for x in 0..(thickness as u32) {
+				for y in 0..(thickness as u32) {
+					let x = (window_center.x - thickness/2.0 + x as f32) as u32;
+					let y = (window_center.y - thickness/2.0 + y as f32) as u32;
+					buffer[(x + (y * window_size.width)) as usize] = color;
+				}
+			}
+			buffer.present().unwrap();
+			return;
+		}
+
+		let l1 = window_center;
+		let l2 = window_center + (delta * 4.0);
 		for x in 0..window_size.width {
 			for y in 0..window_size.height {
 				let dist = line_dist(vec2(x as f32, y as f32), l1, l2, thickness);
