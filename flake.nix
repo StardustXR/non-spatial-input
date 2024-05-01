@@ -32,12 +32,13 @@
           xorg.libXcursor
           xorg.libXrandr
           xorg.libXi
+          wayland
         ];
       };
     });
 
     devShells = forAllSystems (system: let pkgs = nixpkgsFor.${system}; in {
-      default = pkgs.mkShell {
+      default = pkgs.mkShell rec {
         buildInputs = (with pkgs; [
           # inputs
           pkg-config
@@ -52,7 +53,9 @@
           xorg.libXcursor
           xorg.libXrandr
           xorg.libXi
+          wayland
         ]);
+        LD_LIBRARY_PATH = "${nixpkgs.lib.makeLibraryPath buildInputs}";        
       };
     });
   };
