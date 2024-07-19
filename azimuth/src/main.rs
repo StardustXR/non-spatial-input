@@ -13,9 +13,10 @@ use stardust_xr_fusion::{
 	core::values::{color::rgba_linear, Datamap, Vector2},
 	data::{PulseReceiver, PulseSender, PulseSenderAspect},
 	drawable::Lines,
-	fields::{FieldAspect, RayMarchResult},
+	fields::{FieldRefAspect, RayMarchResult},
 	input::{InputDataType, InputMethod, InputMethodAspect, Pointer},
 	node::NodeType,
+	objects::hmd,
 	root::{ClientState, FrameInfo, RootAspect, RootHandler},
 	spatial::{SpatialAspect, Transform},
 	HandlerWrapper,
@@ -67,6 +68,7 @@ async fn main() -> Result<()> {
 	let (client, event_loop) = Client::connect_with_async_loop()
 		.await
 		.expect("Couldn't connect");
+	let hmd = hmd(&client).await.unwrap();
 
 	// Pointer stuff
 	let pointer = InputMethod::create(
@@ -83,7 +85,7 @@ async fn main() -> Result<()> {
 	let pointer = pointer.wrap(handler)?;
 	let _ = pointer
 		.node()
-		.set_relative_transform(client.get_hmd(), Transform::from_translation([0.0; 3]));
+		.set_relative_transform(&hmd, Transform::from_translation([0.0; 3]));
 
 	let line = circle(8, 0.0, 0.001)
 		.thickness(0.0025)

@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 use stardust_xr_fusion::{
 	data::{PulseReceiver, PulseSenderHandler},
 	drawable::Lines,
-	fields::{Field, FieldAspect, RayMarchResult},
+	fields::{Field, FieldRefAspect, RayMarchResult},
 	input::{InputHandler, InputMethod, InputMethodAspect, InputMethodHandler},
 	node::NodeType,
 	spatial::{SpatialAspect, Transform},

@@ -10,10 +10,11 @@ use stardust_xr_fusion::{
 	client::Client,
 	core::values::Vector2,
 	data::{PulseReceiver, PulseSender, PulseSenderAspect},
-	fields::{FieldAspect, RayMarchResult},
+	fields::{FieldRefAspect, RayMarchResult},
 	node::NodeType,
+	objects::hmd,
 	root::{ClientState, FrameInfo, Root, RootAspect, RootHandler},
-	spatial::Transform,
+	spatial::{SpatialRef, Transform},
 };
 use stardust_xr_molecules::{
 	keyboard::{KeyboardEvent, KEYBOARD_MASK},
@@ -53,16 +54,16 @@ async fn main() -> Result<()> {
 	let (client, event_loop) = Client::connect_with_async_loop()
 		.await
 		.expect("Couldn't connect");
+	let hmd = hmd(&client).await.unwrap();
 
 	// Pointer stuff
-	let mouse_sender = PulseSender::create(client.get_hmd(), Transform::identity(), &MOUSE_MASK)?
+	let mouse_sender = PulseSender::create(&hmd, Transform::identity(), &MOUSE_MASK)?
 		.wrap(PulseReceiverCollector::default())?;
 	let (hovered_mouse_tx, hovered_mouse) = watch::channel::<Option<PulseReceiver>>(None);
 
 	// Keyboard stuff
-	let keyboard_sender =
-		PulseSender::create(client.get_hmd(), Transform::identity(), &KEYBOARD_MASK)?
-			.wrap(PulseReceiverCollector::default())?;
+	let keyboard_sender = PulseSender::create(&hmd, Transform::identity(), &KEYBOARD_MASK)?
+		.wrap(PulseReceiverCollector::default())?;
 	let (hovered_keyboard_tx, hovered_keyboard) = watch::channel::<Option<PulseReceiver>>(None);
 
 	let frame_notifier = Arc::new(Notify::new());
@@ -80,13 +81,13 @@ async fn main() -> Result<()> {
 	));
 	tokio::task::spawn(pointer_frame_loop(
 		frame_notifier.clone(),
-		client.clone(),
+		hmd.alias(),
 		mouse_sender.wrapped().clone(),
 		hovered_mouse_tx,
 	));
 	tokio::task::spawn(keyboard_frame_loop(
 		frame_notifier.clone(),
-		client.clone(),
+		hmd.alias(),
 		keyboard_sender.wrapped().clone(),
 		hovered_keyboard_tx,
 	));
@@ -199,30 +200,30 @@ async fn input_loop(
 
 async fn pointer_frame_loop(
 	frame_notifier: Arc<Notify>,
-	client: Arc<Client>,
+	hmd: SpatialRef,
 	mouse_sender: Arc<Mutex<PulseReceiverCollector>>,
 	hovered_mouse_tx: watch::Sender<Option<PulseReceiver>>,
 ) {
 	loop {
 		frame_notifier.notified().await;
-		detect_hover(&client, mouse_sender.clone(), &hovered_mouse_tx).await
+		detect_hover(hmd.alias(), mouse_sender.clone(), &hovered_mouse_tx).await
 	}
 }
 
 async fn keyboard_frame_loop(
 	frame_notifier: Arc<Notify>,
-	client: Arc<Client>,
+	hmd: SpatialRef,
 	keyboard_sender: Arc<Mutex<PulseReceiverCollector>>,
 	hovered_keyboard_tx: watch::Sender<Option<PulseReceiver>>,
 ) {
 	loop {
 		frame_notifier.notified().await;
-		detect_hover(&client, keyboard_sender.clone(), &hovered_keyboard_tx).await
+		detect_hover(hmd.alias(), keyboard_sender.clone(), &hovered_keyboard_tx).await
 	}
 }
 
 async fn detect_hover(
-	client: &Client,
+	hmd: SpatialRef,
 	sender: Arc<Mutex<PulseReceiverCollector>>,
 	hovered_tx: &watch::Sender<Option<PulseReceiver>>,
 ) {
@@ -231,7 +232,7 @@ async fn detect_hover(
 	for (receiver, field) in sender.lock().0.values() {
 		let receiver = receiver.alias();
 		let field = field.alias();
-		let hmd = client.get_hmd().alias();
+		let hmd = hmd.alias();
 		join.spawn(async move {
 			(
 				receiver,
