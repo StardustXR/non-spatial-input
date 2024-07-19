@@ -8,7 +8,6 @@ edition = "2021"
 [dependencies]
 color-eyre = "0.6.2"
 glam = "0.25.0"
-mint = "0.5.9"
 ipc = { path = "../ipc" }
 console-subscriber = "0.2.0"
 parking_lot = "0.12.1"

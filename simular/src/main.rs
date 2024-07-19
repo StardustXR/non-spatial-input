@@ -3,19 +3,17 @@ mod handlers;
 use color_eyre::Result;
 use handlers::PulseReceiverCollector;
 use ipc::receive_input_async_ipc;
-use mint::Vector2;
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
-	client::{Client, ClientState, FrameInfo, RootHandler},
-	data::{
-		xkb::{KEY_Meta_L, KEY_Meta_R},
-		PulseReceiver, PulseSender, PulseSenderAspect,
-	},
+	client::Client,
+	core::values::Vector2,
+	data::{PulseReceiver, PulseSender, PulseSenderAspect},
 	fields::{FieldAspect, RayMarchResult},
 	node::NodeType,
-	spatial::{Spatial, Transform},
+	root::{ClientState, FrameInfo, Root, RootAspect, RootHandler},
+	spatial::Transform,
 };
 use stardust_xr_molecules::{
 	keyboard::{KeyboardEvent, KEYBOARD_MASK},
@@ -68,7 +66,7 @@ async fn main() -> Result<()> {
 	let (hovered_keyboard_tx, hovered_keyboard) = watch::channel::<Option<PulseReceiver>>(None);
 
 	let frame_notifier = Arc::new(Notify::new());
-	let _client_root = client.wrap_root(FrameNotifier(
+	let _client_root = client.get_root().alias().wrap(FrameNotifier(
 		frame_notifier.clone(),
 		client.get_root().alias(),
 	))?;
@@ -108,7 +106,7 @@ async fn input_loop(
 	mouse_sender: PulseSender,
 	hovered_mouse: watch::Receiver<Option<PulseReceiver>>,
 ) {
-	let mut keymap_id: Option<String> = None;
+	let mut keymap_id: Option<u64> = None;
 	let mut mouse_state = MouseEvent {
 		raw_input_events: Some(FxHashSet::default()),
 		..Default::default()
@@ -123,15 +121,15 @@ async fn input_loop(
 				let Ok(new_keymap_id) = future.await else {
 					continue;
 				};
+				println!("got keymap {new_keymap_id}");
 				keymap_id.replace(new_keymap_id);
 			}
 			ipc::Message::Key { keycode, pressed } => {
-				if keycode == KEY_Meta_L || keycode == KEY_Meta_R {}
-
+				dbg!(&*hovered_keyboard.borrow());
 				let Some(hovered_keyboard) = &*hovered_keyboard.borrow() else {
 					continue;
 				};
-				let Some(keymap_id) = keymap_id.clone() else {
+				let Some(keymap_id) = keymap_id else {
 					continue;
 				};
 
@@ -261,12 +259,12 @@ async fn detect_hover(
 	let _ = hovered_tx.send(closest_hit.map(|(r, _)| r));
 }
 
-struct FrameNotifier(Arc<Notify>, Spatial);
+struct FrameNotifier(Arc<Notify>, Root);
 impl RootHandler for FrameNotifier {
 	fn frame(&mut self, _info: FrameInfo) {
 		self.0.notify_waiters();
 	}
-	fn save_state(&mut self) -> ClientState {
+	fn save_state(&mut self) -> Result<ClientState> {
 		ClientState::from_root(&self.1)
 	}
 }

@@ -28,40 +28,35 @@ impl Dispatch<WlKeyboard, ()> for WlHandler {
 		_conn: &wayland_client::Connection,
 		_qhandle: &wayland_client::QueueHandle<WlHandler>,
 	) {
-		match &event {
-			WlKeyboardEvent::Keymap { format, fd, size } => {
-				let mut file = unsafe { std::fs::File::from_raw_fd(fd.as_raw_fd()) };
-				match format.into_result().unwrap() {
-					KeymapFormat::XkbV1 => {
-						let mut data = vec![0u8; *size as usize];
-						// If we weren't passed a pipe, be sure to explicitly
-						// read from the start of the file
-						match file.read_exact_at(&mut data, 0) {
-							Ok(_) => {}
-							Err(err) => {
-								// ideally: we check for:
-								// err.kind() == std::io::ErrorKind::NotSeekable
-								// but that is not yet in stable rust
-								if err.raw_os_error() == Some(libc::ESPIPE) {
-									// It's a pipe, which cannot be seeked, so we
-									// just try reading from the current pipe position
-									file.read(&mut data).expect("read from Keymap fd/pipe");
-								} else {
-									return Err(err).expect("read_exact_at from Keymap fd");
-								}
-							}
+		if let WlKeyboardEvent::Keymap { format, fd, size } = &event {
+			let mut file = unsafe { std::fs::File::from_raw_fd(fd.as_raw_fd()) };
+			if let KeymapFormat::XkbV1 = format.into_result().unwrap() {
+				let mut data = vec![0u8; *size as usize];
+				// If we weren't passed a pipe, be sure to explicitly
+				// read from the start of the file
+				match file.read_exact_at(&mut data, 0) {
+					Ok(_) => {}
+					Err(err) => {
+						// ideally: we check for:
+						// err.kind() == std::io::ErrorKind::NotSeekable
+						// but that is not yet in stable rust
+						if err.raw_os_error() == Some(libc::ESPIPE) {
+							// It's a pipe, which cannot be seeked, so we
+							// just try reading from the current pipe position
+							file.read_exact(&mut data)
+								.expect("read from Keymap fd/pipe");
+						} else {
+							panic!("{1}: {:?}", err, "read_exact_at from Keymap fd");
 						}
-						// Dance around CString panicing on the NUL terminator
-						// in the xkbcommon crate
-						while let Some(0) = data.last() {
-							data.pop();
-						}
-						state.keymap = Some(data);
 					}
-					_ => {}
 				}
+				// Dance around CString panicing on the NUL terminator
+				// in the xkbcommon crate
+				while let Some(0) = data.last() {
+					data.pop();
+				}
+				state.keymap = Some(data);
 			}
-			_ => {}
 		}
 	}
 }

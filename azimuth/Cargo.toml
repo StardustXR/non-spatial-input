@@ -7,10 +7,8 @@ edition = "2021"
 
 [dependencies]
 color-eyre = "0.6.2"
-color-rs = "0.8.0"
 glam = "0.24.0"
 input-event-codes = "5.16.8"
-mint = "0.5.9"
 ipc = { path = "../ipc" }
 console-subscriber = "0.2.0"
 rustc-hash = "1.1.0"

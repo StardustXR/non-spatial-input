@@ -49,9 +49,9 @@ impl Display for Message {
 			}
 			Message::MouseAxisContinuous(a) => format!("Mouse axis continuous {a:?}"),
 			Message::MouseAxisDiscrete(a) => format!("Mouse axis discrete {a:?}"),
-			Message::ResetInput => format!("Reset input"),
+			Message::ResetInput => "Reset input".to_string(),
 			Message::Disconnect => {
-				format!("Disconnect request")
+				"Disconnect request".to_string()
 			}
 		})
 	}
@@ -154,7 +154,7 @@ impl ButtonBlot {
 		self.key_math(code as i32)
 	}
 	pub fn key_released(&mut self, code: u32) {
-		self.key_math(code as i32 * -1)
+		self.key_math(-(code as i32))
 	}
 	pub fn key_update(&mut self, code: u32, pressed: bool) {
 		self.key_math(code as i32 * if pressed { 1 } else { -1 })

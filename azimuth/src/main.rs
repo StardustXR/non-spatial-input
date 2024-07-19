@@ -1,24 +1,23 @@
 pub mod handlers;
 
-use color::rgba_linear;
-use color_eyre::Result;
-use glam::{Quat, Vec3};
-use handlers::{InputHandlerCollector, PulseReceiverCollector};
-use input_event_codes::BTN_LEFT;
+use color_eyre::eyre::Result;
+use glam::Quat;
+use handlers::{PointerHandler, PulseReceiverCollector};
+use input_event_codes::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use ipc::receive_input_async_ipc;
-use mint::Vector2;
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
-	client::{Client, ClientState, FrameInfo, RootHandler},
-	core::values::Datamap,
+	client::Client,
+	core::values::{color::rgba_linear, Datamap, Vector2},
 	data::{PulseReceiver, PulseSender, PulseSenderAspect},
 	drawable::Lines,
 	fields::{FieldAspect, RayMarchResult},
-	input::{InputDataType, InputHandler, InputMethod, InputMethodAspect, Pointer},
+	input::{InputDataType, InputMethod, InputMethodAspect, Pointer},
 	node::NodeType,
-	spatial::{Spatial, SpatialAspect, Transform},
+	root::{ClientState, FrameInfo, RootAspect, RootHandler},
+	spatial::{SpatialAspect, Transform},
 	HandlerWrapper,
 };
 use stardust_xr_molecules::{
@@ -27,15 +26,17 @@ use stardust_xr_molecules::{
 };
 use std::{io::IsTerminal, sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinSet};
-use tracing::{info, info_span, instrument};
+use tracing::{info, info_span};
 
 // degrees per pixel, constant for now since i'm lazy
-const MOUSE_SENSITIVITY: f32 = 0.01;
+const MOUSE_SENSITIVITY: f32 = 0.1;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PointerDatamap {
 	mouse: (),
 	select: f32,
+	middle: f32,
+	context: f32,
 	grab: f32,
 	scroll_continuous: Vector2<f32>,
 	scroll_discrete: Vector2<f32>,
@@ -46,6 +47,8 @@ impl Default for PointerDatamap {
 		Self {
 			mouse: (),
 			select: 0.0,
+			middle: 0.0,
+			context: 0.0,
 			grab: 0.0,
 			scroll_continuous: [0.0; 2].into(),
 			scroll_discrete: [0.0; 2].into(),
@@ -75,8 +78,9 @@ async fn main() -> Result<()> {
 			deepest_point: [0.0; 3].into(),
 		}),
 		&Datamap::from_typed(PointerDatamap::default())?,
-	)?
-	.wrap(InputHandlerCollector::default())?;
+	)?;
+	let handler = PointerHandler::new(pointer.alias());
+	let pointer = pointer.wrap(handler)?;
 	let _ = pointer
 		.node()
 		.set_relative_transform(client.get_hmd(), Transform::from_translation([0.0; 3]));
@@ -113,7 +117,7 @@ async fn main() -> Result<()> {
 		keyboard_sender.wrapped().clone(),
 		hovered_keyboard_tx,
 	));
-	let _client_root = client.wrap_root(Root {
+	let _client_root = client.get_root().alias().wrap(Root {
 		root: client.get_root().alias(),
 		pointer,
 		pointer_reticle,
@@ -135,7 +139,7 @@ async fn input_loop(
 	hovered_keyboard: watch::Receiver<Option<PulseReceiver>>,
 	frame_count_rx: watch::Receiver<u32>,
 ) {
-	let mut keymap_id: Option<String> = None;
+	let mut keymap_id: Option<u64> = None;
 
 	let mut yaw = 0.0;
 	let mut pitch = 0.0;
@@ -174,7 +178,7 @@ async fn input_loop(
 				let Some(hovered_keyboard) = &*hovered_keyboard.borrow() else {
 					continue;
 				};
-				let Some(keymap_id) = keymap_id.clone() else {
+				let Some(keymap_id) = keymap_id else {
 					continue;
 				};
 				KeyboardEvent {
@@ -211,20 +215,24 @@ async fn input_loop(
 						mouse_buttons.remove(&button);
 					}
 				}
-				pointer_datamap.raw_input_events = mouse_buttons.clone();
+				pointer_datamap.raw_input_events.clone_from(&mouse_buttons);
 				match button {
 					BTN_LEFT!() => {
 						pointer_datamap.select = if pressed { 1.0 } else { 0.0 };
 					}
-					8..=9 => {
+					BTN_MIDDLE!() => {
+						pointer_datamap.middle = if pressed { 1.0 } else { 0.0 };
+					}
+					BTN_RIGHT!() => {
+						pointer_datamap.context = if pressed { 1.0 } else { 0.0 };
+					}
+					_ => {
 						// idk why this number but that's what it spits out for side mousebuttons lol
 						pointer_datamap.grab = if pressed { 1.0 } else { 0.0 };
-						dbg!("holding right mouse button");
-					}
-					b => {
-						println!("Unknown mouse button {b}");
-						continue;
-					}
+					} // b => {
+					  // 	println!("Unknown mouse button {b}");
+					  // 	continue;
+					  // }
 				}
 				pointer
 					.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap())
@@ -257,7 +265,6 @@ async fn input_loop(
 	}
 }
 
-#[instrument]
 async fn reconnect_keyboard_loop(
 	pointer: InputMethod,
 	keyboard_sender: Arc<Mutex<PulseReceiverCollector>>,
@@ -298,80 +305,21 @@ async fn reconnect_keyboard_loop(
 	}
 }
 
-#[instrument]
-fn update_pointer(
-	pointer: InputMethod,
-	input_handler_collector: Arc<Mutex<InputHandlerCollector>>,
-	pointer_reticle: Lines,
-) {
-	let mut closest_hits: Option<(Vec<InputHandler>, RayMarchResult)> = None;
-	let mut join = JoinSet::new();
-	for (handler, field) in input_handler_collector.lock().0.values() {
-		let handler = handler.alias();
-		let field = field.alias();
-		let pointer = pointer.alias();
-		join.spawn(async move {
-			(
-				handler,
-				field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]).await,
-			)
-		});
-	}
-	tokio::spawn(async move {
-		while let Some(res) = join.join_next().await {
-			let Ok((handler, Ok(ray_info))) = res else {
-				continue;
-			};
-			if ray_info.min_distance > 0.0 {
-				continue;
-			}
-			if let Some((hit_handlers, hit_info)) = &mut closest_hits {
-				if ray_info.deepest_point_distance == hit_info.deepest_point_distance {
-					hit_handlers.push(handler);
-				} else if ray_info.deepest_point_distance < hit_info.deepest_point_distance {
-					*hit_handlers = vec![handler];
-					*hit_info = ray_info;
-				}
-			} else {
-				closest_hits.replace((vec![handler], ray_info));
-			}
-		}
-
-		if let Some((hit_handlers, hit_info)) = closest_hits {
-			let _ = pointer.set_handler_order(hit_handlers.as_slice());
-			let _ = pointer_reticle.set_relative_transform(
-				&pointer,
-				Transform::from_translation(
-					Vec3::from(hit_info.ray_origin)
-						+ Vec3::from(hit_info.ray_direction)
-							* hit_info.deepest_point_distance
-							* 0.95,
-				),
-			);
-		} else {
-			let _ = pointer.set_handler_order(&[]);
-			let _ = pointer_reticle
-				.set_relative_transform(&pointer, Transform::from_translation([0.0, 0.0, -0.5]));
-		}
-	});
-}
-
 struct Root {
-	root: Spatial,
-	pointer: HandlerWrapper<InputMethod, InputHandlerCollector>,
+	root: stardust_xr_fusion::root::Root,
+	pointer: HandlerWrapper<InputMethod, PointerHandler>,
 	pointer_reticle: Lines,
 	frame_count_tx: watch::Sender<u32>,
 }
 impl RootHandler for Root {
 	fn frame(&mut self, _info: FrameInfo) {
 		self.frame_count_tx.send_modify(|i| *i += 1);
-		update_pointer(
-			self.pointer.node().alias(),
-			self.pointer.wrapped().clone(),
-			self.pointer_reticle.alias(),
-		);
+		self.pointer
+			.wrapped()
+			.lock()
+			.update_pointer(self.pointer_reticle.alias());
 	}
-	fn save_state(&mut self) -> ClientState {
+	fn save_state(&mut self) -> Result<ClientState> {
 		ClientState::from_root(&self.root)
 	}
 }
