@@ -18,7 +18,7 @@ use stardust_xr_fusion::{
 	node::NodeType,
 	objects::hmd,
 	root::{ClientState, FrameInfo, RootAspect, RootHandler},
-	spatial::{SpatialAspect, Transform},
+	spatial::{SpatialAspect, SpatialRef, Transform},
 	HandlerWrapper,
 };
 use stardust_xr_molecules::{
@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
 	));
 	let _client_root = client.get_root().alias().wrap(Root {
 		root: client.get_root().alias(),
+		hmd,
 		pointer,
 		pointer_reticle,
 		frame_count_tx,
@@ -309,6 +310,7 @@ async fn reconnect_keyboard_loop(
 
 struct Root {
 	root: stardust_xr_fusion::root::Root,
+	hmd: SpatialRef,
 	pointer: HandlerWrapper<InputMethod, PointerHandler>,
 	pointer_reticle: Lines,
 	frame_count_tx: watch::Sender<u32>,
@@ -316,6 +318,10 @@ struct Root {
 impl RootHandler for Root {
 	fn frame(&mut self, _info: FrameInfo) {
 		self.frame_count_tx.send_modify(|i| *i += 1);
+		let _ = self
+			.pointer
+			.node()
+			.set_relative_transform(&self.hmd, Transform::from_translation([0.0; 3]));
 		self.pointer
 			.wrapped()
 			.lock()
