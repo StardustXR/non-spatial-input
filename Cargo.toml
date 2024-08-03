@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 members = ["azimuth", "display", "eclipse", "ipc", "manifold", "simular"]
 
 [workspace.dependencies]
