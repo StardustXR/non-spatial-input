@@ -1,5 +1,5 @@
 use glam::Vec3;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use stardust_xr_fusion::{
 	data::{PulseReceiver, PulseSenderHandler},
 	drawable::Lines,
@@ -26,7 +26,8 @@ impl PulseSenderHandler for PulseReceiverCollector {
 pub struct PointerHandler {
 	pointer: InputMethod,
 	handlers: FxHashMap<u64, (InputHandler, Field)>,
-	captured: Option<InputHandler>,
+	capture_requests: FxHashSet<u64>,
+	captured: Option<u64>,
 }
 impl InputMethodHandler for PointerHandler {
 	fn create_handler(&mut self, handler: InputHandler, field: Field) {
@@ -34,12 +35,8 @@ impl InputMethodHandler for PointerHandler {
 			.insert(handler.node().get_id().unwrap(), (handler, field));
 	}
 	fn request_capture_handler(&mut self, uid: u64) {
-		let Some((new_capture, _)) = self.handlers.get(&uid) else {
-			return;
-		};
-		if self.captured.is_none() {
-			self.captured.replace(new_capture.alias());
-		}
+		dbg!(uid);
+		self.capture_requests.insert(uid);
 	}
 	fn destroy_handler(&mut self, uid: u64) {
 		self.handlers.remove(&uid);
@@ -50,16 +47,27 @@ impl PointerHandler {
 		PointerHandler {
 			pointer,
 			handlers: FxHashMap::default(),
+			capture_requests: FxHashSet::default(),
 			captured: None,
 		}
 	}
 	pub fn update_pointer(&mut self, pointer_reticle: Lines) {
-		if let Some(captured) = self.captured.take() {
+		if let Some(captured_id) = self.captured {
+			dbg!(captured_id);
+			if !self.capture_requests.contains(&captured_id) {
+				self.captured = None;
+			}
+		}
+		if self.captured.is_none() {
+			self.captured = self.capture_requests.drain().next();
+		}
+		if let Some((captured, _)) = self.captured.and_then(|id| self.handlers.get(&id)) {
 			self.pointer.set_handler_order(&[captured.alias()]).unwrap();
 			self.pointer.set_captures(&[captured.alias()]).unwrap();
+			return;
 		}
+		let _ = self.pointer.set_captures(&[]);
 
-		let mut closest_hits: Option<(Vec<InputHandler>, RayMarchResult)> = None;
 		let mut join = JoinSet::new();
 		for (handler, field) in self.handlers.values() {
 			let handler = handler.alias();
@@ -75,6 +83,7 @@ impl PointerHandler {
 
 		let pointer = self.pointer.alias();
 		tokio::spawn(async move {
+			let mut handlers: Vec<(InputHandler, RayMarchResult)> = Vec::new();
 			while let Some(res) = join.join_next().await {
 				let Ok((handler, Ok(ray_info))) = res else {
 					continue;
@@ -82,19 +91,34 @@ impl PointerHandler {
 				if ray_info.min_distance > 0.0 {
 					continue;
 				}
-				if let Some((hit_handlers, hit_info)) = &mut closest_hits {
-					if ray_info.deepest_point_distance == hit_info.deepest_point_distance {
-						hit_handlers.push(handler);
-					} else if ray_info.deepest_point_distance < hit_info.deepest_point_distance {
-						*hit_handlers = vec![handler];
-						*hit_info = ray_info;
-					}
-				} else {
-					closest_hits.replace((vec![handler], ray_info));
+				if ray_info.deepest_point_distance < 0.01 {
+					continue;
 				}
+				handlers.push((handler, ray_info));
 			}
-
+			let closest_hits = handlers
+				.into_iter()
+				.map(|(a, b)| (vec![a], b))
+				// now collect all handlers that are same distance if they're the closest
+				.reduce(|(mut handlers_a, result_a), (handlers_b, result_b)| {
+					if (result_a.deepest_point_distance - result_b.deepest_point_distance).abs()
+						< 0.001
+					{
+						// distance is basically the same
+						handlers_a.extend(handlers_b);
+						(handlers_a, result_a)
+					} else if result_a.deepest_point_distance < result_b.deepest_point_distance {
+						(handlers_a, result_a)
+					} else {
+						(handlers_b, result_b)
+					}
+				});
+			// let dbg_info = closest_hits
+			// 	.as_ref()
+			// 	.map(|(handlers, info)| (handlers.len(), info.deepest_point_distance));
+			// dbg!(dbg_info);
 			if let Some((hit_handlers, hit_info)) = closest_hits {
+				dbg!(hit_handlers.len());
 				let _ = pointer.set_handler_order(hit_handlers.as_slice());
 				let _ = pointer_reticle.set_relative_transform(
 					&pointer,
