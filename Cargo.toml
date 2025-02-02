@@ -15,7 +15,9 @@ tokio = { version = "1.32.0", features = [
 features = ["keymap"]
 git = "https://github.com/StardustXR/core.git"
 branch = "dev"
+# rev = "6ea2a27d"
 
 [workspace.dependencies.stardust-xr-molecules]
 git = "https://github.com/StardustXR/molecules.git"
 branch = "dev"
+# rev = "0b763dab"
