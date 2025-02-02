@@ -15,6 +15,7 @@ rustc-hash = "1.1.0"
 input-event-codes = "5.16.8"
 
 tokio = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 stardust-xr-fusion = { workspace = true }
 stardust-xr-molecules = { workspace = true }
+zbus = { version = "5.3.1", features = ["tokio"] }
