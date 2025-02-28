@@ -6,12 +6,12 @@ use stardust_xr_fusion::{
 	core::{messenger::MessengerError, values::Vector2},
 	fields::FieldRefAspect,
 	objects::{hmd, interfaces::FieldRefProxy, object_registry::ObjectRegistry, FieldRefProxyExt},
-	root::{RootAspect, RootEvent},
+	root::RootAspect,
 	ClientHandle,
 };
 use stardust_xr_molecules::keyboard::KeyboardHandlerProxy;
-use std::{io::IsTerminal, sync::Arc};
-use tokio::sync::mpsc;
+use std::{cell::UnsafeCell, io::IsTerminal, sync::Arc};
+use tokio::sync::{mpsc, Notify};
 use zbus::Connection;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -37,36 +37,41 @@ async fn main() -> Result<()> {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | simular`");
 	}
-	let client = Client::connect().await.expect("Couldn't connect");
+	let mut client = Client::connect().await.expect("Couldn't connect");
 	let client_handle = client.handle();
-	let _async_loop = client.async_event_loop();
+	let on_frame = Arc::new(Notify::new());
+	tokio::spawn({
+		let on_frame = on_frame.clone();
+		async move {
+			loop {
+				{
+					let client_cell = UnsafeCell::new(&mut client);
+					// this is safe because internally the client uses 2 chaneels, one for flush and
+					// one for dispatch
+					tokio::select! {
+						v = unsafe { client_cell.get().as_mut().unwrap().flush() } => v.unwrap(),
+						v = unsafe { client_cell.get().as_mut().unwrap().dispatch() } => v.unwrap(),
+					};
+				}
+				println!("event");
+				if let Some(stardust_xr_fusion::root::RootEvent::Frame { info: _ }) =
+					client.get_root().recv_root_event()
+				{
+					on_frame.notify_one();
+					println!("frame");
+				}
+			}
+		}
+	});
 	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
 
-	// Pointer stuff
-	// let mouse_sender = PulseSender::create(&hmd, Transform::identity(), &MOUSE_MASK)?
-	// 	.wrap(PulseReceiverCollector::default())?;
-	// let (hovered_mouse_tx, hovered_mouse) = watch::channel::<Option<PulseReceiver>>(None);
-
-	// Keyboard stuff
-	// let keyboard_sender = PulseSender::create(&hmd, Transform::identity(), &KEYBOARD_MASK)?
-	// 	.wrap(PulseReceiverCollector::default())?;
-	// let (hovered_keyboard_tx, hovered_keyboard) = watch::channel::<Option<PulseReceiver>>(None);
-
-	let event_loop = tokio::task::spawn(spatialize_input(client_handle.clone(), keyboard_rx));
+	let event_loop = tokio::task::spawn(spatialize_input(
+		on_frame,
+		client_handle.clone(),
+		keyboard_rx,
+	));
 	println!("running input loop");
 	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx));
-	// tokio::task::spawn(pointer_frame_loop(
-	// 	frame_notifier.clone(),
-	// 	hmd.alias(),
-	// 	mouse_sender.wrapped().clone(),
-	// 	hovered_mouse_tx,
-	// ));
-	// tokio::task::spawn(keyboard_frame_loop(
-	// 	frame_notifier.clone(),
-	// 	hmd.alias(),
-	// 	keyboard_sender.wrapped().clone(),
-	// 	hovered_keyboard_tx,
-	// ));
 
 	_ = tokio::select! {
 		biased;
@@ -80,8 +85,8 @@ async fn main() -> Result<()> {
 	Ok(())
 }
 
-// async fn spatialize_input(event_loop: Notify, client: Arc<ClientHandle>) {
 async fn spatialize_input(
+	frame_notifier: Arc<Notify>,
 	client: Arc<ClientHandle>,
 	mut key_events: mpsc::UnboundedReceiver<KeyboardEvent>,
 ) -> Result<(), MessengerError> {
@@ -89,9 +94,7 @@ async fn spatialize_input(
 	let object_registry = ObjectRegistry::new(&conn).await.unwrap();
 	let hmd = hmd(&client).await.unwrap();
 	loop {
-		let Some(RootEvent::Frame { info: _ }) = client.get_root().recv_root_event() else {
-			continue;
-		};
+		frame_notifier.notified().await;
 		let keyboard_handlers = object_registry.get_objects("org.stardustxr.XKBv1");
 		let mut closest_distance = f32::INFINITY;
 		let mut closest_handler = None;
