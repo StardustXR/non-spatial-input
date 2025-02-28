@@ -65,7 +65,7 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 							.unwrap()
 							.key_update(k.key(), k.key_state() == KeyState::Pressed);
 						Message::Key {
-							keycode: k.key(),
+							keycode: k.key() + 8,
 							pressed: k.key_state() == KeyState::Pressed,
 						}
 					}

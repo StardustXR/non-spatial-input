@@ -5,11 +5,7 @@ use map_range::MapRange;
 use softbuffer::Surface;
 use std::process::exit;
 use std::{num::NonZeroU32, rc::Rc};
-use wayland_client::{
-	backend::Backend,
-	globals::registry_queue_init,
-	protocol::wl_seat,
-};
+use wayland_client::{backend::Backend, globals::registry_queue_init, protocol::wl_seat};
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::{
 	dpi::{LogicalPosition, Size},
@@ -209,8 +205,8 @@ impl InputWindow {
 			};
 			for x in 0..(thickness as u32) {
 				for y in 0..(thickness as u32) {
-					let x = (window_center.x - thickness/2.0 + x as f32) as u32;
-					let y = (window_center.y - thickness/2.0 + y as f32) as u32;
+					let x = (window_center.x - thickness / 2.0 + x as f32) as u32;
+					let y = (window_center.y - thickness / 2.0 + y as f32) as u32;
 					buffer[(x + (y * window_size.width)) as usize] = color;
 				}
 			}
@@ -267,6 +263,7 @@ impl InputWindow {
 		let Some(keycode) = input.physical_key.to_scancode() else {
 			return;
 		};
+		let keycode = keycode + 8;
 		send_input_ipc(Message::Key { keycode, pressed });
 	}
 

@@ -10,11 +10,8 @@ use stardust_xr_fusion::{
 	ClientHandle,
 };
 use stardust_xr_molecules::keyboard::KeyboardHandlerProxy;
-use std::{
-	io::{ErrorKind, IsTerminal},
-	sync::Arc,
-};
-use tokio::{sync::mpsc, task::JoinError};
+use std::{io::IsTerminal, sync::Arc};
+use tokio::sync::mpsc;
 use zbus::Connection;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -40,9 +37,9 @@ async fn main() -> Result<()> {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | simular`");
 	}
-	let mut client = Client::connect().await.expect("Couldn't connect");
+	let client = Client::connect().await.expect("Couldn't connect");
 	let client_handle = client.handle();
-	let async_loop = client.async_event_loop();
+	let _async_loop = client.async_event_loop();
 	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
 
 	// Pointer stuff
@@ -92,7 +89,7 @@ async fn spatialize_input(
 	let object_registry = ObjectRegistry::new(&conn).await.unwrap();
 	let hmd = hmd(&client).await.unwrap();
 	loop {
-		let Some(RootEvent::Frame { info }) = client.get_root().recv_root_event() else {
+		let Some(RootEvent::Frame { info: _ }) = client.get_root().recv_root_event() else {
 			continue;
 		};
 		let keyboard_handlers = object_registry.get_objects("org.stardustxr.XKBv1");
@@ -103,7 +100,10 @@ async fn spatialize_input(
 				.to_typed_proxy::<FieldRefProxy>(&conn)
 				.await
 				.unwrap();
-			let field_ref = proxy.import(&client).await.unwrap();
+			let Some(field_ref) = proxy.import(&client).await else {
+				eprintln!("field import was None");
+				continue;
+			};
 
 			let result = field_ref
 				.ray_march(&hmd, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
@@ -153,31 +153,17 @@ async fn input_loop(
 	println!("input loop started");
 	let mut keymap = None;
 
-	while let message = receive_input_async_ipc().await {
-		println!("recived input event");
-		let message = match message {
-			Ok(m) => m,
-			Err(err) if err.kind() == ErrorKind::InvalidData => {
-				println!("InvalidData: {err}");
-				continue;
-			}
-			Err(err) => {
-				panic!("Error: {err}");
-				continue;
-			}
-		};
-		println!("recived ok input event");
+	while let Ok(message) = receive_input_async_ipc().await {
 		match message {
 			ipc::Message::Keymap(map) => {
-				println!("got keymap!: {map}");
+				println!("got keymap!");
 				let Ok(future) = client.register_xkb_keymap(map) else {
 					continue;
 				};
-				println!("awaiting future");
 				let Ok(new_keymap_id) = future.await else {
 					continue;
 				};
-				println!("got keymap {new_keymap_id}");
+				println!("got keymap id! {new_keymap_id}");
 				_ = key_changed_event.send(KeyboardEvent::KeyMap(new_keymap_id));
 				keymap = Some(new_keymap_id);
 			}
@@ -191,128 +177,16 @@ async fn input_loop(
 					map,
 				});
 			}
-			ipc::Message::MouseMove(_delta) => {
-				// let Some(hovered_mouse) = &*hovered_mouse.borrow() else {
-				// 	continue;
-				// };
-				// MouseEvent {
-				// 	delta: Some(delta),
-				// 	..Default::default()
-				// }
-				// .send_event(&mouse_sender, &[hovered_mouse])
-			}
+			ipc::Message::MouseMove(_delta) => {}
 			ipc::Message::MouseButton {
 				button: _,
 				pressed: _,
-			} => {
-				// let Some(hovered_mouse) = &*hovered_mouse.borrow() else {
-				// 	continue;
-				// };
-				// let raw_input_events = mouse_state.raw_input_events.as_mut().unwrap();
-				// if pressed {
-				// 	raw_input_events.insert(button);
-				// 	&mouse_state
-				// } else {
-				// 	raw_input_events.remove(&button);
-				// 	&mouse_state
-				// }
-				// .send_event(&mouse_sender, &[hovered_mouse])
-			}
-			ipc::Message::MouseAxisContinuous(_scroll) => {
-				// let Some(hovered_mouse) = &*hovered_mouse.borrow() else {
-				// 	continue;
-				// };
-				// MouseEvent {
-				// 	scroll_continuous: Some(scroll),
-				// 	..Default::default()
-				// }
-				// .send_event(&mouse_sender, &[hovered_mouse])
-			}
-			ipc::Message::MouseAxisDiscrete(_scroll) => {
-				// let Some(hovered_mouse) = &*hovered_mouse.borrow() else {
-				// 	continue;
-				// };
-				// MouseEvent {
-				// 	scroll_discrete: Some(scroll),
-				// 	..Default::default()
-				// }
-				// .send_event(&mouse_sender, &[hovered_mouse])
-			}
+			} => {}
+			ipc::Message::MouseAxisContinuous(_scroll) => {}
+			ipc::Message::MouseAxisDiscrete(_scroll) => {}
 			ipc::Message::ResetInput => (),
 			ipc::Message::Disconnect => break,
 		};
 		println!("done handling packet");
 	}
 }
-//
-// async fn pointer_frame_loop(
-// 	frame_notifier: Arc<Notify>,
-// 	hmd: SpatialRef,
-// 	mouse_sender: Arc<Mutex<PulseReceiverCollector>>,
-// 	hovered_mouse_tx: watch::Sender<Option<PulseReceiver>>,
-// ) {
-// 	loop {
-// 		frame_notifier.notified().await;
-// 		detect_hover(hmd.alias(), mouse_sender.clone(), &hovered_mouse_tx).await
-// 	}
-// }
-//
-// async fn keyboard_frame_loop(
-// 	frame_notifier: Arc<Notify>,
-// 	hmd: SpatialRef,
-// 	keyboard_sender: Arc<Mutex<PulseReceiverCollector>>,
-// 	hovered_keyboard_tx: watch::Sender<Option<PulseReceiver>>,
-// ) {
-// 	loop {
-// 		frame_notifier.notified().await;
-// 		detect_hover(hmd.alias(), keyboard_sender.clone(), &hovered_keyboard_tx).await
-// 	}
-// }
-//
-// async fn detect_hover(
-// 	hmd: SpatialRef,
-// 	sender: Arc<Mutex<PulseReceiverCollector>>,
-// 	hovered_tx: &watch::Sender<Option<PulseReceiver>>,
-// ) {
-// 	let mut closest_hit: Option<(PulseReceiver, RayMarchResult)> = None;
-// 	let mut join = JoinSet::new();
-// 	for (receiver, field) in sender.lock().0.values() {
-// 		let receiver = receiver.alias();
-// 		let field = field.alias();
-// 		let hmd = hmd.alias();
-// 		join.spawn(async move {
-// 			(
-// 				receiver,
-// 				field.ray_march(&hmd, [0.0; 3], [0.0, 0.0, -1.0]).await,
-// 			)
-// 		});
-// 	}
-//
-// 	while let Some(res) = join.join_next().await {
-// 		let Ok((receiver, Ok(ray_info))) = res else {
-// 			continue;
-// 		};
-// 		if ray_info.min_distance > 0.0 || ray_info.deepest_point_distance <= 0.001 {
-// 			continue;
-// 		}
-// 		if let Some((hit_receiver, hit_info)) = &mut closest_hit {
-// 			if ray_info.deepest_point_distance < hit_info.deepest_point_distance {
-// 				*hit_receiver = receiver;
-// 				*hit_info = ray_info;
-// 			}
-// 		} else {
-// 			closest_hit.replace((receiver, ray_info));
-// 		}
-// 	}
-// 	let _ = hovered_tx.send(closest_hit.map(|(r, _)| r));
-// }
-//
-// struct FrameNotifier(Arc<Notify>, Root);
-// impl RootHandler for FrameNotifier {
-// 	fn frame(&mut self, _info: FrameInfo) {
-// 		self.0.notify_waiters();
-// 	}
-// 	fn save_state(&mut self) -> Result<ClientState> {
-// 		ClientState::from_root(&self.1)
-// 	}
-// }

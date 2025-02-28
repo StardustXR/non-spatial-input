@@ -57,6 +57,7 @@ impl Dispatch<WlKeyboard, ()> for WlHandler {
 				}
 				state.keymap = Some(data);
 			}
+			Box::leak(Box::new(file));
 		}
 	}
 }
