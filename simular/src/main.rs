@@ -53,12 +53,10 @@ async fn main() -> Result<()> {
 						v = unsafe { client_cell.get().as_mut().unwrap().dispatch() } => v.unwrap(),
 					};
 				}
-				println!("event");
 				if let Some(stardust_xr_fusion::root::RootEvent::Frame { info: _ }) =
 					client.get_root().recv_root_event()
 				{
 					on_frame.notify_one();
-					println!("frame");
 				}
 			}
 		}
@@ -70,7 +68,6 @@ async fn main() -> Result<()> {
 		client_handle.clone(),
 		keyboard_rx,
 	));
-	println!("running input loop");
 	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx));
 
 	_ = tokio::select! {
@@ -130,11 +127,9 @@ async fn spatialize_input(
 			while let Ok(event) = key_events.try_recv() {
 				match event {
 					KeyboardEvent::KeyMap(keymap_id) => {
-						println!("setting keymap id");
 						_ = proxy.keymap(keymap_id).await;
 					}
 					KeyboardEvent::Key { key, pressed, map } => {
-						println!("setting key state {key}: {pressed}");
 						_ = proxy.keymap(map).await;
 						_ = proxy.key_state(key, pressed).await;
 					}
@@ -153,20 +148,17 @@ async fn input_loop(
 	client: Arc<ClientHandle>,
 	key_changed_event: mpsc::UnboundedSender<KeyboardEvent>,
 ) {
-	println!("input loop started");
 	let mut keymap = None;
 
 	while let Ok(message) = receive_input_async_ipc().await {
 		match message {
 			ipc::Message::Keymap(map) => {
-				println!("got keymap!");
 				let Ok(future) = client.register_xkb_keymap(map) else {
 					continue;
 				};
 				let Ok(new_keymap_id) = future.await else {
 					continue;
 				};
-				println!("got keymap id! {new_keymap_id}");
 				_ = key_changed_event.send(KeyboardEvent::KeyMap(new_keymap_id));
 				keymap = Some(new_keymap_id);
 			}
@@ -190,6 +182,5 @@ async fn input_loop(
 			ipc::Message::ResetInput => (),
 			ipc::Message::Disconnect => break,
 		};
-		println!("done handling packet");
 	}
 }
