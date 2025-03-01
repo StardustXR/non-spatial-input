@@ -6,12 +6,12 @@ use stardust_xr_fusion::{
 	core::{messenger::MessengerError, values::Vector2},
 	fields::FieldRefAspect,
 	objects::{hmd, interfaces::FieldRefProxy, object_registry::ObjectRegistry, FieldRefProxyExt},
-	root::RootAspect,
-	ClientHandle,
+	root::{RootAspect, RootEvent},
+	AsyncEventHandle, ClientHandle,
 };
 use stardust_xr_molecules::keyboard::KeyboardHandlerProxy;
-use std::{cell::UnsafeCell, io::IsTerminal, sync::Arc};
-use tokio::sync::{mpsc, Notify};
+use std::{io::IsTerminal, sync::Arc};
+use tokio::sync::mpsc;
 use zbus::Connection;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -37,34 +37,14 @@ async fn main() -> Result<()> {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | simular`");
 	}
-	let mut client = Client::connect().await.expect("Couldn't connect");
+	let client = Client::connect().await.expect("Couldn't connect");
 	let client_handle = client.handle();
-	let on_frame = Arc::new(Notify::new());
-	tokio::spawn({
-		let on_frame = on_frame.clone();
-		async move {
-			loop {
-				{
-					let client_cell = UnsafeCell::new(&mut client);
-					// this is safe because internally the client uses 2 chaneels, one for flush and
-					// one for dispatch
-					tokio::select! {
-						v = unsafe { client_cell.get().as_mut().unwrap().flush() } => v.unwrap(),
-						v = unsafe { client_cell.get().as_mut().unwrap().dispatch() } => v.unwrap(),
-					};
-				}
-				if let Some(stardust_xr_fusion::root::RootEvent::Frame { info: _ }) =
-					client.get_root().recv_root_event()
-				{
-					on_frame.notify_one();
-				}
-			}
-		}
-	});
+	let async_loop = client.async_event_loop();
+	let event_handle = async_loop.get_event_handle();
 	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
 
 	let event_loop = tokio::task::spawn(spatialize_input(
-		on_frame,
+		event_handle,
 		client_handle.clone(),
 		keyboard_rx,
 	));
@@ -83,7 +63,7 @@ async fn main() -> Result<()> {
 }
 
 async fn spatialize_input(
-	frame_notifier: Arc<Notify>,
+	event_handle: AsyncEventHandle,
 	client: Arc<ClientHandle>,
 	mut key_events: mpsc::UnboundedReceiver<KeyboardEvent>,
 ) -> Result<(), MessengerError> {
@@ -91,7 +71,13 @@ async fn spatialize_input(
 	let object_registry = ObjectRegistry::new(&conn).await.unwrap();
 	let hmd = hmd(&client).await.unwrap();
 	loop {
-		frame_notifier.notified().await;
+		event_handle.wait().await;
+		if !matches!(
+			client.get_root().recv_root_event(),
+			Some(RootEvent::Frame { info: _ })
+		) {
+			continue;
+		}
 		let keyboard_handlers = object_registry.get_objects("org.stardustxr.XKBv1");
 		let mut closest_distance = f32::INFINITY;
 		let mut closest_handler = None;
