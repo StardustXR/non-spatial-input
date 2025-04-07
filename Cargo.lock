@@ -2727,7 +2727,7 @@ checksum = "2f2b15926089e5526bb2dd738a2eb0e59034356e06eb71e1cd912358c0e62c4d"
 [[package]]
 name = "stardust-xr"
 version = "0.45.0"
-source = "git+https://github.com/StardustXR/core.git?branch=dev#f24dd8be395581b282e15cdec571df44fbd8b70d"
+source = "git+https://github.com/StardustXR/core.git?branch=dev#d2964d8db079afaadb7faa4987e34814e62d6279"
 dependencies = [
  "cluFlock",
  "color-eyre",
@@ -2748,7 +2748,7 @@ dependencies = [
 [[package]]
 name = "stardust-xr-fusion"
 version = "0.45.0"
-source = "git+https://github.com/StardustXR/core.git?branch=dev#f24dd8be395581b282e15cdec571df44fbd8b70d"
+source = "git+https://github.com/StardustXR/core.git?branch=dev#d2964d8db079afaadb7faa4987e34814e62d6279"
 dependencies = [
  "color-eyre",
  "dashmap",
@@ -2771,7 +2771,7 @@ dependencies = [
 [[package]]
 name = "stardust-xr-fusion-codegen"
 version = "0.1.0"
-source = "git+https://github.com/StardustXR/core.git?branch=dev#f24dd8be395581b282e15cdec571df44fbd8b70d"
+source = "git+https://github.com/StardustXR/core.git?branch=dev#d2964d8db079afaadb7faa4987e34814e62d6279"
 dependencies = [
  "convert_case",
  "mint",
@@ -2804,7 +2804,7 @@ dependencies = [
 [[package]]
 name = "stardust-xr-molecules"
 version = "0.45.0"
-source = "git+https://github.com/StardustXR/molecules.git?branch=dev#0b763dab993d3fe04fa86aeb98fa48f721e8f4b0"
+source = "git+https://github.com/StardustXR/molecules.git?branch=dev#4871307e677cab37a606400b3101a51c335f851f"
 dependencies = [
  "futures-util",
  "glam 0.27.0",
@@ -2840,7 +2840,7 @@ dependencies = [
 [[package]]
 name = "stardust-xr-schemas"
 version = "1.5.3"
-source = "git+https://github.com/StardustXR/core.git?branch=dev#f24dd8be395581b282e15cdec571df44fbd8b70d"
+source = "git+https://github.com/StardustXR/core.git?branch=dev#d2964d8db079afaadb7faa4987e34814e62d6279"
 dependencies = [
  "flatbuffers 24.3.25",
  "flexbuffers",
