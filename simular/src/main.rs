@@ -10,6 +10,7 @@ use stardust_xr_fusion::{
 	AsyncEventHandle, ClientHandle,
 };
 use stardust_xr_molecules::keyboard::KeyboardHandlerProxy;
+use stardust_xr_molecules::mouse::MouseHandlerProxy;
 use std::{io::IsTerminal, sync::Arc};
 use tokio::sync::mpsc;
 use zbus::Connection;
@@ -42,18 +43,28 @@ async fn main() -> Result<()> {
 	let async_loop = client.async_event_loop();
 	let event_handle = async_loop.get_event_handle();
 	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
+	let (mouse_tx, mouse_rx) = mpsc::unbounded_channel::<MouseEvent>();
 
-	let event_loop = tokio::task::spawn(spatialize_input(
-		event_handle,
+	let keyboard_loop = tokio::task::spawn(spatialize_keyboard_input(
+		event_handle.clone(),
 		client_handle.clone(),
 		keyboard_rx,
 	));
-	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx));
+	let mouse_loop = tokio::task::spawn(spatialize_mouse_input(
+		event_handle,
+		client_handle.clone(),
+		mouse_rx,
+	));
+	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
 
 	_ = tokio::select! {
 		biased;
 		_ = tokio::signal::ctrl_c() => Ok(()),
-		e = event_loop => match e {
+		e = keyboard_loop => match e {
+			Ok(v) => Ok(v?),
+			err @ Err(_) => err.map(|_|()),
+		},
+		e = mouse_loop => match e {
 			Ok(v) => Ok(v?),
 			err @ Err(_) => err.map(|_|()),
 		},
@@ -62,7 +73,75 @@ async fn main() -> Result<()> {
 	Ok(())
 }
 
-async fn spatialize_input(
+async fn spatialize_mouse_input(
+	event_handle: AsyncEventHandle,
+	client: Arc<ClientHandle>,
+	mut mouse_events: mpsc::UnboundedReceiver<MouseEvent>,
+) -> Result<(), MessengerError> {
+	let conn = Connection::session().await.unwrap();
+	let object_registry = ObjectRegistry::new(&conn).await.unwrap();
+	let hmd = hmd(&client).await.unwrap();
+	loop {
+		event_handle.wait().await;
+		if !matches!(
+			client.get_root().recv_root_event(),
+			Some(RootEvent::Frame { info: _ })
+		) {
+			continue;
+		}
+		let mouse_handlers = object_registry.get_objects("org.stardustxr.Mousev1");
+		let mut closest_distance = f32::INFINITY;
+		let mut closest_handler = None;
+		for handler in &mouse_handlers {
+			let proxy = handler
+				.to_typed_proxy::<FieldRefProxy>(&conn)
+				.await
+				.unwrap();
+			let Some(field_ref) = proxy.import(&client).await else {
+				eprintln!("field import was None");
+				continue;
+			};
+
+			let result = field_ref
+				.ray_march(&hmd, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
+				.await
+				.unwrap();
+
+			if result.deepest_point_distance > 0.0
+				&& result.min_distance < 0.05
+				&& result.deepest_point_distance < closest_distance
+			{
+				closest_distance = result.deepest_point_distance;
+				closest_handler = Some(handler);
+			}
+		}
+
+		if let Some(handler) = closest_handler {
+			let proxy = handler
+				.to_typed_proxy::<MouseHandlerProxy>(&conn)
+				.await
+				.unwrap();
+			while let Ok(event) = mouse_events.try_recv() {
+				match event {
+					MouseEvent::Move { delta } => {
+						_ = proxy.motion((delta.x, delta.y)).await;
+					}
+					MouseEvent::Button { button, pressed } => {
+						_ = proxy.button(button, pressed).await;
+					}
+					MouseEvent::AxisContinuous { a } => {
+						_ = proxy.scroll_continuous((a.x, a.y));
+					}
+					MouseEvent::AxisDiscrete { a } => {
+						_ = proxy.scroll_discrete((a.x, a.y));
+					}
+				}
+			}
+		}
+	}
+}
+
+async fn spatialize_keyboard_input(
 	event_handle: AsyncEventHandle,
 	client: Arc<ClientHandle>,
 	mut key_events: mpsc::UnboundedReceiver<KeyboardEvent>,
@@ -130,9 +209,17 @@ enum KeyboardEvent {
 	KeyMap(u64),
 }
 
+enum MouseEvent {
+	Move { delta: Vector2<f32> },
+	Button { button: u32, pressed: bool },
+	AxisContinuous { a: Vector2<f32> },
+	AxisDiscrete { a: Vector2<f32> },
+}
+
 async fn input_loop(
 	client: Arc<ClientHandle>,
 	key_changed_event: mpsc::UnboundedSender<KeyboardEvent>,
+	mouse_changed_event: mpsc::UnboundedSender<MouseEvent>,
 ) {
 	let mut keymap = None;
 
@@ -158,13 +245,18 @@ async fn input_loop(
 					map,
 				});
 			}
-			ipc::Message::MouseMove(_delta) => {}
-			ipc::Message::MouseButton {
-				button: _,
-				pressed: _,
-			} => {}
-			ipc::Message::MouseAxisContinuous(_scroll) => {}
-			ipc::Message::MouseAxisDiscrete(_scroll) => {}
+			ipc::Message::MouseMove(delta) => {
+				_ = mouse_changed_event.send(MouseEvent::Move { delta });
+			}
+			ipc::Message::MouseButton { button, pressed } => {
+				_ = mouse_changed_event.send(MouseEvent::Button { button, pressed });
+			}
+			ipc::Message::MouseAxisContinuous(scroll) => {
+				_ = mouse_changed_event.send(MouseEvent::AxisContinuous { a: scroll });
+			}
+			ipc::Message::MouseAxisDiscrete(scroll) => {
+				_ = mouse_changed_event.send(MouseEvent::AxisDiscrete { a: scroll });
+			}
 			ipc::Message::ResetInput => (),
 			ipc::Message::Disconnect => break,
 		};
