@@ -81,6 +81,7 @@ async fn spatialize_mouse_input(
 	let conn = Connection::session().await.unwrap();
 	let object_registry = ObjectRegistry::new(&conn).await.unwrap();
 	let hmd = hmd(&client).await.unwrap();
+	let mut last_handler = None;
 	loop {
 		event_handle.wait().await;
 		if !matches!(
@@ -116,6 +117,18 @@ async fn spatialize_mouse_input(
 			}
 		}
 
+		if let Some(last) = last_handler.as_ref() {
+			if Some(last) != closest_handler {
+				match last.to_typed_proxy::<MouseHandlerProxy>(&conn).await {
+					Ok(proxy) => {
+						_ = proxy.reset().await;
+					}
+					Err(err) => {
+						eprintln!("unable to get mouse proxy for last handler: {err}")
+					}
+				};
+			}
+		}
 		if let Some(handler) = closest_handler {
 			let proxy = handler
 				.to_typed_proxy::<MouseHandlerProxy>(&conn)
@@ -138,6 +151,7 @@ async fn spatialize_mouse_input(
 				}
 			}
 		}
+		last_handler = closest_handler.cloned();
 	}
 }
 
@@ -149,6 +163,7 @@ async fn spatialize_keyboard_input(
 	let conn = Connection::session().await.unwrap();
 	let object_registry = ObjectRegistry::new(&conn).await.unwrap();
 	let hmd = hmd(&client).await.unwrap();
+	let mut last_handler = None;
 	loop {
 		event_handle.wait().await;
 		if !matches!(
@@ -184,6 +199,18 @@ async fn spatialize_keyboard_input(
 			}
 		}
 
+		if let Some(last) = last_handler.as_ref() {
+			if Some(last) != closest_handler {
+				match last.to_typed_proxy::<KeyboardHandlerProxy>(&conn).await {
+					Ok(proxy) => {
+						_ = proxy.reset().await;
+					}
+					Err(err) => {
+						eprintln!("unable to get keyboard proxy for last handler: {err}")
+					}
+				};
+			}
+		}
 		if let Some(handler) = closest_handler {
 			let proxy = handler
 				.to_typed_proxy::<KeyboardHandlerProxy>(&conn)
@@ -201,6 +228,7 @@ async fn spatialize_keyboard_input(
 				}
 			}
 		}
+		last_handler = closest_handler.cloned();
 	}
 }
 
