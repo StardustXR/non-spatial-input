@@ -284,11 +284,13 @@ impl InputWindow {
 		};
 
 		let grab = if grab {
-			CursorGrabMode::Confined
+			self.window
+				.set_cursor_grab(CursorGrabMode::Confined)
+				.or_else(|_| self.window.set_cursor_grab(CursorGrabMode::None))
 		} else {
-			CursorGrabMode::None
+			self.window.set_cursor_grab(CursorGrabMode::None)
 		};
-		if self.window.set_cursor_grab(grab).is_ok() {
+		if grab.is_ok() {
 			self.window.set_title(window_title);
 		}
 	}
