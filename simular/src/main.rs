@@ -143,10 +143,10 @@ async fn spatialize_mouse_input(
 						_ = proxy.button(button, pressed).await;
 					}
 					MouseEvent::AxisContinuous { a } => {
-						_ = proxy.scroll_continuous((a.x, a.y));
+						_ = proxy.scroll_continuous((a.x, a.y)).await;
 					}
 					MouseEvent::AxisDiscrete { a } => {
-						_ = proxy.scroll_discrete((a.x, a.y));
+						_ = proxy.scroll_discrete((a.x, a.y)).await;
 					}
 				}
 			}
