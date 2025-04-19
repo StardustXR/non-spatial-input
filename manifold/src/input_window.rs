@@ -275,7 +275,7 @@ impl InputWindow {
 		}
 		self.grabbed = grab;
 
-		self.window.set_cursor_visible(!grab);
+		// self.window.set_cursor_visible(!grab);
 
 		let window_title = if grab {
 			Self::GRABBED_WINDOW_TITLE
@@ -285,8 +285,8 @@ impl InputWindow {
 
 		let grab = if grab {
 			self.window
-				.set_cursor_grab(CursorGrabMode::Confined)
-				.or_else(|_| self.window.set_cursor_grab(CursorGrabMode::None))
+				.set_cursor_grab(CursorGrabMode::Locked)
+				.or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined))
 		} else {
 			self.window.set_cursor_grab(CursorGrabMode::None)
 		};

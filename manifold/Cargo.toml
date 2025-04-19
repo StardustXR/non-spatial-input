@@ -1,5 +1,5 @@
 [package]
-name = "stardust-xr-manifold"
+name = "manifold"
 version = "0.2.0"
 edition = "2021"
 authors = ["Nova King <technobaboo@proton.me>"]
@@ -21,7 +21,7 @@ mint = { version = "0.5.9" }
 stardust-xr-schemas = "1.5.3"
 ctrlc = "3.4.4"
 map-range = "0.1.2"
-glam = {version = "0.27.0", features=["mint"]}
+glam = { version = "0.27.0", features = ["mint"] }
 ipc = { path = "../ipc" }
 as-raw-xcb-connection = "1.0.1"
 wayland-client = "0.31.2"

@@ -1643,6 +1643,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "manifold"
+version = "0.2.0"
+dependencies = [
+ "as-raw-xcb-connection",
+ "ctrlc",
+ "glam 0.27.0",
+ "input-event-codes",
+ "ipc",
+ "libc",
+ "map-range",
+ "mint",
+ "softbuffer",
+ "stardust-xr-schemas 1.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "wayland-client",
+ "wayland-sys",
+ "winit",
+ "xkbcommon 0.7.0",
+]
+
+[[package]]
 name = "map-range"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2792,26 +2812,6 @@ dependencies = [
  "quote",
  "split-iter",
  "stardust-xr-schemas 1.5.3 (git+https://github.com/StardustXR/core.git?branch=dev)",
-]
-
-[[package]]
-name = "stardust-xr-manifold"
-version = "0.2.0"
-dependencies = [
- "as-raw-xcb-connection",
- "ctrlc",
- "glam 0.27.0",
- "input-event-codes",
- "ipc",
- "libc",
- "map-range",
- "mint",
- "softbuffer",
- "stardust-xr-schemas 1.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "wayland-client",
- "wayland-sys",
- "winit",
- "xkbcommon 0.7.0",
 ]
 
 [[package]]
