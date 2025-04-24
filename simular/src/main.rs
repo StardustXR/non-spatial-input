@@ -3,7 +3,7 @@ use ipc::receive_input_async_ipc;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
 	client::Client,
-	core::{messenger::MessengerError, values::Vector2},
+	core::values::Vector2,
 	fields::FieldRefAspect,
 	objects::{hmd, interfaces::FieldRefProxy, object_registry::ObjectRegistry, FieldRefProxyExt},
 	root::{RootAspect, RootEvent},
@@ -13,7 +13,7 @@ use stardust_xr_molecules::keyboard::KeyboardHandlerProxy;
 use stardust_xr_molecules::mouse::MouseHandlerProxy;
 use std::{io::IsTerminal, sync::Arc};
 use tokio::sync::mpsc;
-use zbus::Connection;
+use zbus::{proxy::Defaults, Connection, Proxy};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PointerDatamap {
@@ -38,6 +38,7 @@ async fn main() -> Result<()> {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | simular`");
 	}
+	let conn = Connection::session().await.unwrap();
 	let client = Client::connect().await.expect("Couldn't connect");
 	let client_handle = client.handle();
 	let async_loop = client.async_event_loop();
@@ -45,43 +46,72 @@ async fn main() -> Result<()> {
 	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
 	let (mouse_tx, mouse_rx) = mpsc::unbounded_channel::<MouseEvent>();
 
-	let keyboard_loop = tokio::task::spawn(spatialize_keyboard_input(
+	let keyboard_loop =
+		tokio::task::spawn(spatialize_input::<KeyboardHandlerProxy, KeyboardEvent>(
+			"org.stardustxr.XKBv1",
+			async |proxy, event| match event {
+				KeyboardEvent::KeyMap(keymap_id) => {
+					_ = proxy.keymap(keymap_id).await;
+				}
+				KeyboardEvent::Key { key, pressed, map } => {
+					_ = proxy.keymap(map).await;
+					_ = proxy.key_state(key, pressed).await;
+				}
+			},
+			// async |proxy| /* _ = proxy.reset().await */(),
+			conn.clone(),
+			event_handle.clone(),
+			client_handle.clone(),
+			keyboard_rx,
+		));
+	let mouse_loop = tokio::task::spawn(spatialize_input::<MouseHandlerProxy, MouseEvent>(
+		"org.stardustxr.Mousev1",
+		async |proxy, event| match event {
+			MouseEvent::Move { delta } => {
+				_ = proxy.motion((delta.x, delta.y)).await;
+			}
+			MouseEvent::Button { button, pressed } => {
+				_ = proxy.button(button, pressed).await;
+			}
+			MouseEvent::AxisContinuous { a } => {
+				_ = proxy.scroll_continuous((a.x, a.y)).await;
+			}
+			MouseEvent::AxisDiscrete { a } => {
+				_ = proxy.scroll_discrete((a.x, a.y)).await;
+			}
+		},
+		// async |proxy| (), /* _ = proxy.reset().await */
+		conn.clone(),
 		event_handle.clone(),
-		client_handle.clone(),
-		keyboard_rx,
-	));
-	let mouse_loop = tokio::task::spawn(spatialize_mouse_input(
-		event_handle,
 		client_handle.clone(),
 		mouse_rx,
 	));
 	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
 
-	_ = tokio::select! {
+	tokio::select! {
 		biased;
-		_ = tokio::signal::ctrl_c() => Ok(()),
-		e = keyboard_loop => match e {
-			Ok(v) => Ok(v?),
-			err @ Err(_) => err.map(|_|()),
-		},
-		e = mouse_loop => match e {
-			Ok(v) => Ok(v?),
-			err @ Err(_) => err.map(|_|()),
-		},
-		_ = input_loop => Ok(()),
+		e = tokio::signal::ctrl_c() => e?,
+		e = keyboard_loop => e?,
+		e = mouse_loop => e?,
+		e = input_loop => e?,
 	};
 	Ok(())
 }
 
-async fn spatialize_mouse_input(
+#[allow(clippy::too_many_arguments)]
+async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E>(
+	interface: &'static str,
+	handle_event: impl AsyncFn(&P, E),
+	// reset: impl AsyncFn(&P),
+	conn: Connection,
 	event_handle: AsyncEventHandle,
 	client: Arc<ClientHandle>,
-	mut mouse_events: mpsc::UnboundedReceiver<MouseEvent>,
-) -> Result<(), MessengerError> {
-	let conn = Connection::session().await.unwrap();
-	let object_registry = ObjectRegistry::new(&conn).await.unwrap();
+	mut events: mpsc::UnboundedReceiver<E>,
+) {
+	let conn = &conn;
+	let object_registry = ObjectRegistry::new(conn).await.unwrap();
 	let hmd = hmd(&client).await.unwrap();
-	let mut last_handler = None;
+	// let mut last_handler = None;
 	loop {
 		event_handle.wait().await;
 		if !matches!(
@@ -90,14 +120,11 @@ async fn spatialize_mouse_input(
 		) {
 			continue;
 		}
-		let mouse_handlers = object_registry.get_objects("org.stardustxr.Mousev1");
+		let handlers = object_registry.get_objects(interface);
 		let mut closest_distance = f32::INFINITY;
 		let mut closest_handler = None;
-		for handler in &mouse_handlers {
-			let proxy = handler
-				.to_typed_proxy::<FieldRefProxy>(&conn)
-				.await
-				.unwrap();
+		for handler in &handlers {
+			let proxy = handler.to_typed_proxy::<FieldRefProxy>(conn).await.unwrap();
 			let Some(field_ref) = proxy.import(&client).await else {
 				eprintln!("field import was None");
 				continue;
@@ -117,118 +144,25 @@ async fn spatialize_mouse_input(
 			}
 		}
 
-		if let Some(last) = last_handler.as_ref() {
-			if Some(last) != closest_handler {
-				match last.to_typed_proxy::<MouseHandlerProxy>(&conn).await {
-					Ok(proxy) => {
-						_ = proxy.reset().await;
-					}
-					Err(err) => {
-						eprintln!("unable to get mouse proxy for last handler: {err}")
-					}
-				};
-			}
-		}
+		// if let Some(last) = last_handler.as_ref() {
+		// 	if Some(last) != closest_handler {
+		// 		match last.to_typed_proxy::<P>(conn).await {
+		// 			Ok(proxy) => {
+		// 				reset(&proxy).await;
+		// 			}
+		// 			Err(err) => {
+		// 				eprintln!("unable to get {interface} proxy for last handler: {err}")
+		// 			}
+		// 		};
+		// 	}
+		// }
 		if let Some(handler) = closest_handler {
-			let proxy = handler
-				.to_typed_proxy::<MouseHandlerProxy>(&conn)
-				.await
-				.unwrap();
-			while let Ok(event) = mouse_events.try_recv() {
-				match event {
-					MouseEvent::Move { delta } => {
-						_ = proxy.motion((delta.x, delta.y)).await;
-					}
-					MouseEvent::Button { button, pressed } => {
-						_ = proxy.button(button, pressed).await;
-					}
-					MouseEvent::AxisContinuous { a } => {
-						_ = proxy.scroll_continuous((a.x, a.y)).await;
-					}
-					MouseEvent::AxisDiscrete { a } => {
-						_ = proxy.scroll_discrete((a.x, a.y)).await;
-					}
-				}
+			let proxy = handler.to_typed_proxy::<P>(conn).await.unwrap();
+			while let Ok(event) = events.try_recv() {
+				handle_event(&proxy, event).await
 			}
 		}
-		last_handler = closest_handler.cloned();
-	}
-}
-
-async fn spatialize_keyboard_input(
-	event_handle: AsyncEventHandle,
-	client: Arc<ClientHandle>,
-	mut key_events: mpsc::UnboundedReceiver<KeyboardEvent>,
-) -> Result<(), MessengerError> {
-	let conn = Connection::session().await.unwrap();
-	let object_registry = ObjectRegistry::new(&conn).await.unwrap();
-	let hmd = hmd(&client).await.unwrap();
-	let mut last_handler = None;
-	loop {
-		event_handle.wait().await;
-		if !matches!(
-			client.get_root().recv_root_event(),
-			Some(RootEvent::Frame { info: _ })
-		) {
-			continue;
-		}
-		let keyboard_handlers = object_registry.get_objects("org.stardustxr.XKBv1");
-		let mut closest_distance = f32::INFINITY;
-		let mut closest_handler = None;
-		for handler in &keyboard_handlers {
-			let proxy = handler
-				.to_typed_proxy::<FieldRefProxy>(&conn)
-				.await
-				.unwrap();
-			let Some(field_ref) = proxy.import(&client).await else {
-				eprintln!("field import was None");
-				continue;
-			};
-
-			let result = field_ref
-				.ray_march(&hmd, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
-				.await
-				.unwrap();
-
-			if result.deepest_point_distance > 0.0
-				&& result.min_distance < 0.05
-				&& result.deepest_point_distance < closest_distance
-			{
-				closest_distance = result.deepest_point_distance;
-				closest_handler = Some(handler);
-			}
-		}
-
-		if let Some(last) = last_handler.as_ref() {
-			if Some(last) != closest_handler {
-				match last.to_typed_proxy::<KeyboardHandlerProxy>(&conn).await {
-					Ok(proxy) => {
-						_ = proxy.reset().await;
-					}
-					Err(err) => {
-						eprintln!("unable to get keyboard proxy for last handler: {err}")
-					}
-				};
-			}
-		}
-		if let Some(handler) = closest_handler {
-			let proxy = handler
-				.to_typed_proxy::<KeyboardHandlerProxy>(&conn)
-				.await
-				.unwrap();
-			while let Ok(event) = key_events.try_recv() {
-				match event {
-					KeyboardEvent::KeyMap(keymap_id) => {
-						_ = proxy.keymap(keymap_id).await;
-					}
-					KeyboardEvent::Key { key, pressed, map } => {
-						_ = proxy.keymap(map).await;
-						_ = proxy.key_state(key, pressed).await;
-					}
-				}
-			}
-		}
-		last_handler = closest_handler.cloned();
+		// last_handler = closest_handler.cloned();
 	}
 }
 
