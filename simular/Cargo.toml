@@ -5,6 +5,9 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+tracy = ["dep:tracing-tracy", "dep:tracy-client"]
+
 [dependencies]
 color-eyre = "0.6.2"
 glam = "0.27.0"
@@ -20,3 +23,8 @@ serde = { workspace = true, features = ["derive"] }
 stardust-xr-fusion = { workspace = true }
 stardust-xr-molecules = { workspace = true }
 zbus = { version = "5.3.1", features = ["tokio"] }
+
+tracing-tracy = { version = "0.11.4", optional = true }
+tracy-client = { version = "0.18.0", optional = true }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tracing = "0.1.40"

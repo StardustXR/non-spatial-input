@@ -1,4 +1,5 @@
 use color_eyre::Result;
+use glam::Vec2;
 use ipc::receive_input_async_ipc;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -13,12 +14,14 @@ use stardust_xr_fusion::{
 		FieldRefProxyExt,
 	},
 	root::{RootAspect, RootEvent},
-	AsyncEventHandle, ClientHandle,
+	ClientHandle,
 };
 use stardust_xr_molecules::keyboard::KeyboardHandlerProxy;
 use stardust_xr_molecules::mouse::MouseHandlerProxy;
 use std::{io::IsTerminal, sync::Arc};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
+use tracing::{debug_span, Instrument};
+use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter};
 use zbus::{proxy::Defaults, Connection, Proxy};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -39,54 +42,111 @@ impl Default for PointerDatamap {
 	}
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | simular`");
 	}
+	let registry = tracing_subscriber::registry();
+	#[cfg(feature = "tracy")]
+	let registry = registry.with(tracing_tracy::TracyLayer::default());
+	tracing::subscriber::set_global_default(
+		registry
+			.with(EnvFilter::from_default_env())
+			.with(tracing_subscriber::fmt::layer().compact()),
+	)
+	.unwrap();
 	let conn = connect_client().await.unwrap();
 	let client = Client::connect().await.expect("Couldn't connect");
 	let client_handle = client.handle();
 	let async_loop = client.async_event_loop();
-	let event_handle = async_loop.get_event_handle();
+	let async_event_handle = async_loop.get_event_handle();
 	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
 	let (mouse_tx, mouse_rx) = mpsc::unbounded_channel::<MouseEvent>();
 
+	let event_handle = Arc::new(Notify::new());
+	let frame_loop = tokio::task::spawn({
+		let event_handle = event_handle.clone();
+		let client_handle = client_handle.clone();
+		async move {
+			loop {
+				async_event_handle.wait().await;
+				match client_handle.get_root().recv_root_event() {
+					Some(RootEvent::Frame { info: _ }) => {
+						event_handle.notify_waiters();
+					}
+					Some(RootEvent::Ping { response }) => {
+						response.send(Ok(()));
+					}
+					Some(RootEvent::SaveState { response: _ }) => {
+						// no state to save
+					}
+					None => {}
+				}
+			}
+		}
+	});
+
 	let keyboard_loop =
-		tokio::task::spawn(spatialize_input::<KeyboardHandlerProxy, KeyboardEvent>(
+		tokio::task::spawn(spatialize_input::<KeyboardHandlerProxy, KeyboardEvent, ()>(
 			"org.stardustxr.XKBv1",
-			async |proxy, event| match event {
+			async |proxy, event, _| match event {
 				KeyboardEvent::KeyMap(keymap_id) => {
-					_ = proxy.keymap(keymap_id).await;
+					_ = proxy
+						.keymap(keymap_id)
+						.instrument(debug_span!("sending keymap"))
+						.await;
 				}
 				KeyboardEvent::Key { key, pressed, map } => {
-					_ = proxy.keymap(map).await;
-					_ = proxy.key_state(key, pressed).await;
+					_ = proxy
+						.keymap(map)
+						.instrument(debug_span!("sending keymap as part of button"))
+						.await;
+					_ = proxy
+						.key_state(key, pressed)
+						.instrument(debug_span!("sending keypress"))
+						.await;
 				}
 			},
-			// async |proxy| /* _ = proxy.reset().await */(),
+			async |_, _| {},
+			async |proxy| _ = proxy.reset().await,
 			conn.clone(),
 			event_handle.clone(),
 			client_handle.clone(),
 			keyboard_rx,
 		));
-	let mouse_loop = tokio::task::spawn(spatialize_input::<MouseHandlerProxy, MouseEvent>(
+	let mouse_loop = tokio::task::spawn(spatialize_input::<MouseHandlerProxy, MouseEvent, Vec2>(
 		"org.stardustxr.Mousev1",
-		async |proxy, event| match event {
+		async |proxy, event, move_state: &mut Option<Vec2>| match event {
 			MouseEvent::Move { delta } => {
-				_ = proxy.motion((delta.x, delta.y)).await;
+				*move_state.get_or_insert(Vec2::ZERO) += Vec2::from(delta);
 			}
 			MouseEvent::Button { button, pressed } => {
-				_ = proxy.button(button, pressed).await;
+				_ = proxy
+					.button(button, pressed)
+					.instrument(debug_span!("sending mouse button"))
+					.await;
 			}
 			MouseEvent::AxisContinuous { a } => {
-				_ = proxy.scroll_continuous((a.x, a.y)).await;
+				_ = proxy
+					.scroll_continuous((a.x, a.y))
+					.instrument(debug_span!("sending mouse scroll continuos"))
+					.await;
 			}
 			MouseEvent::AxisDiscrete { a } => {
-				_ = proxy.scroll_discrete((a.x, a.y)).await;
+				_ = proxy
+					.scroll_discrete((a.x, a.y))
+					.instrument(debug_span!("sending mouse scroll discrete"))
+					.await;
 			}
 		},
-		// async |proxy| (), /* _ = proxy.reset().await */
+		async |proxy, delta| {
+			_ = proxy
+				.motion((delta.x, delta.y))
+				.instrument(debug_span!("sending mouse motion"))
+				.await;
+		},
+		async |proxy| _ = proxy.reset().await,
 		conn.clone(),
 		event_handle.clone(),
 		client_handle.clone(),
@@ -100,17 +160,19 @@ async fn main() -> Result<()> {
 		e = keyboard_loop => e?,
 		e = mouse_loop => e?,
 		e = input_loop => e?,
+		e = frame_loop => e?,
 	};
 	Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E>(
+async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E, C>(
 	interface: &'static str,
-	handle_event: impl AsyncFn(&P, E),
-	// reset: impl AsyncFn(&P),
+	handle_event: impl AsyncFn(&P, E, &mut Option<C>),
+	handle_cached_event: impl AsyncFn(&P, C),
+	reset: impl AsyncFn(&P),
 	conn: Connection,
-	event_handle: AsyncEventHandle,
+	event_handle: Arc<Notify>,
 	client: Arc<ClientHandle>,
 	mut events: mpsc::UnboundedReceiver<E>,
 ) {
@@ -118,15 +180,9 @@ async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E>(
 	let object_registry = ObjectRegistry::new(conn).await.unwrap();
 	let hmd = hmd(&client).await.unwrap();
 	let mut handler_cache = FxHashMap::<ObjectInfo, FieldRef>::default();
-	// let mut last_handler = None;
+	let mut last_handler = None;
 	loop {
-		event_handle.wait().await;
-		if !matches!(
-			client.get_root().recv_root_event(),
-			Some(RootEvent::Frame { info: _ })
-		) {
-			continue;
-		}
+		event_handle.notified().await;
 		let handlers = object_registry.get_objects(interface);
 		let mut closest_distance = f32::INFINITY;
 		let mut closest_handler = None;
@@ -145,6 +201,7 @@ async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E>(
 
 			let result = match field_ref
 				.ray_march(&hmd, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
+				.instrument(debug_span!("raymarching"))
 				.await
 			{
 				Ok(r) => r,
@@ -164,25 +221,39 @@ async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E>(
 		}
 		handler_cache.retain(|handler, _| handlers.contains(handler));
 
-		// if let Some(last) = last_handler.as_ref() {
-		// 	if Some(last) != closest_handler {
-		// 		match last.to_typed_proxy::<P>(conn).await {
-		// 			Ok(proxy) => {
-		// 				reset(&proxy).await;
-		// 			}
-		// 			Err(err) => {
-		// 				eprintln!("unable to get {interface} proxy for last handler: {err}")
-		// 			}
-		// 		};
-		// 	}
-		// }
-		if let Some(handler) = closest_handler {
-			let proxy = handler.to_typed_proxy::<P>(conn).await.unwrap();
-			while let Ok(event) = events.try_recv() {
-				handle_event(&proxy, event).await
+		if let Some(last) = last_handler.as_ref() {
+			if Some(last) != closest_handler {
+				match last.to_typed_proxy::<P>(conn).await {
+					Ok(proxy) => {
+						reset(&proxy).await;
+					}
+					Err(err) => {
+						eprintln!("unable to get {interface} proxy for last handler: {err}")
+					}
+				};
 			}
 		}
-		// last_handler = closest_handler.cloned();
+		let mut cached_state = None;
+		if let Some(handler) = closest_handler {
+			let proxy = handler
+				.to_typed_proxy::<P>(conn)
+				.instrument(debug_span!("getting proxy"))
+				.await
+				.unwrap();
+			while let Ok(event) = events.try_recv() {
+				handle_event(&proxy, event, &mut cached_state)
+					.instrument(debug_span!("calling handler fn"))
+					.await
+			}
+			if let Some(cached_state) = cached_state {
+				handle_cached_event(&proxy, cached_state)
+					.instrument(debug_span!("calling cached handler"))
+					.await
+			}
+		} else {
+			while events.try_recv().is_ok() {}
+		}
+		last_handler = closest_handler.cloned();
 	}
 }
 
@@ -204,8 +275,10 @@ async fn input_loop(
 	mouse_changed_event: mpsc::UnboundedSender<MouseEvent>,
 ) {
 	let mut keymap = None;
-
-	while let Ok(message) = receive_input_async_ipc().await {
+	while let Ok(message) = receive_input_async_ipc()
+		.instrument(debug_span!("handling input ipc message"))
+		.await
+	{
 		match message {
 			ipc::Message::Keymap(map) => {
 				let Ok(future) = client.register_xkb_keymap(map) else {
@@ -228,6 +301,7 @@ async fn input_loop(
 				});
 			}
 			ipc::Message::MouseMove(delta) => {
+				let _span = debug_span!("send mouse motion").entered();
 				_ = mouse_changed_event.send(MouseEvent::Move { delta });
 			}
 			ipc::Message::MouseButton { button, pressed } => {

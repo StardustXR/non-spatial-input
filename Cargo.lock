@@ -368,7 +368,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "tracing-tracy",
+ "tracing-tracy 0.10.5",
 ]
 
 [[package]]
@@ -2652,6 +2652,10 @@ dependencies = [
  "stardust-xr-fusion",
  "stardust-xr-molecules",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-tracy 0.11.4",
+ "tracy-client 0.18.0",
  "zbus",
 ]
 
@@ -2812,6 +2816,7 @@ dependencies = [
 [[package]]
 name = "stardust-xr-molecules"
 version = "0.45.0"
+source = "git+https://github.com/StardustXR/molecules.git?branch=dev#4cab488881f21077383a7a00330bb44e2ca0e06d"
 dependencies = [
  "futures-util",
  "glam 0.27.0",
@@ -3214,7 +3219,18 @@ checksum = "fca0df0602d3ac1cfd7413bd4f463800fe076bf6b88698722aa763fe1561248b"
 dependencies = [
  "tracing-core",
  "tracing-subscriber",
- "tracy-client",
+ "tracy-client 0.16.5",
+]
+
+[[package]]
+name = "tracing-tracy"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0eaa1852afa96e0fe9e44caa53dc0bd2d9d05e0f2611ce09f97f8677af56e4ba"
+dependencies = [
+ "tracing-core",
+ "tracing-subscriber",
+ "tracy-client 0.18.0",
 ]
 
 [[package]]
@@ -3225,7 +3241,18 @@ checksum = "307e6b7030112fe9640fdd87988a40795549ba75c355f59485d14e6b444d2987"
 dependencies = [
  "loom",
  "once_cell",
- "tracy-client-sys",
+ "tracy-client-sys 0.22.2",
+]
+
+[[package]]
+name = "tracy-client"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d90a2c01305b02b76fdd89ac8608bae27e173c829a35f7d76a345ab5d33836db"
+dependencies = [
+ "loom",
+ "once_cell",
+ "tracy-client-sys 0.24.3",
 ]
 
 [[package]]
@@ -3235,6 +3262,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d104d610dfa9dd154535102cc9c6164ae1fa37842bc2d9e83f9ac82b0ae0882"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "tracy-client-sys"
+version = "0.24.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69fff37da548239c3bf9e64a12193d261e8b22b660991c6fd2df057c168f435f"
+dependencies = [
+ "cc",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
