@@ -1,11 +1,17 @@
 use color_eyre::Result;
 use ipc::receive_input_async_ipc;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use stardust_xr_fusion::{
 	client::Client,
 	core::values::Vector2,
-	fields::FieldRefAspect,
-	objects::{hmd, interfaces::FieldRefProxy, object_registry::ObjectRegistry, FieldRefProxyExt},
+	fields::{FieldRef, FieldRefAspect},
+	objects::{
+		connect_client, hmd,
+		interfaces::FieldRefProxy,
+		object_registry::{ObjectInfo, ObjectRegistry},
+		FieldRefProxyExt,
+	},
 	root::{RootAspect, RootEvent},
 	AsyncEventHandle, ClientHandle,
 };
@@ -38,7 +44,7 @@ async fn main() -> Result<()> {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | simular`");
 	}
-	let conn = Connection::session().await.unwrap();
+	let conn = connect_client().await.unwrap();
 	let client = Client::connect().await.expect("Couldn't connect");
 	let client_handle = client.handle();
 	let async_loop = client.async_event_loop();
@@ -111,6 +117,7 @@ async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E>(
 	let conn = &conn;
 	let object_registry = ObjectRegistry::new(conn).await.unwrap();
 	let hmd = hmd(&client).await.unwrap();
+	let mut handler_cache = FxHashMap::<ObjectInfo, FieldRef>::default();
 	// let mut last_handler = None;
 	loop {
 		event_handle.wait().await;
@@ -124,16 +131,28 @@ async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E>(
 		let mut closest_distance = f32::INFINITY;
 		let mut closest_handler = None;
 		for handler in &handlers {
-			let proxy = handler.to_typed_proxy::<FieldRefProxy>(conn).await.unwrap();
-			let Some(field_ref) = proxy.import(&client).await else {
-				eprintln!("field import was None");
-				continue;
+			let field_ref = if let Some(cached) = handler_cache.get(handler) {
+				cached.clone()
+			} else {
+				let proxy = handler.to_typed_proxy::<FieldRefProxy>(conn).await.unwrap();
+				let Some(field_ref) = proxy.import(&client).await else {
+					eprintln!("field import was None");
+					continue;
+				};
+				handler_cache.insert(handler.clone(), field_ref.clone());
+				field_ref
 			};
 
-			let result = field_ref
+			let result = match field_ref
 				.ray_march(&hmd, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
 				.await
-				.unwrap();
+			{
+				Ok(r) => r,
+				Err(err) => {
+					eprintln!("error while raymarching: {err}");
+					continue;
+				}
+			};
 
 			if result.deepest_point_distance > 0.0
 				&& result.min_distance < 0.05
@@ -143,6 +162,7 @@ async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E>(
 				closest_handler = Some(handler);
 			}
 		}
+		handler_cache.retain(|handler, _| handlers.contains(handler));
 
 		// if let Some(last) = last_handler.as_ref() {
 		// 	if Some(last) != closest_handler {
