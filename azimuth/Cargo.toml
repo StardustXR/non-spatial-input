@@ -7,9 +7,10 @@ edition = "2021"
 
 [dependencies]
 color-eyre = "0.6.2"
-glam = "0.24.0"
+glam = "0.30.0"
 input-event-codes = "5.16.8"
 ipc = { path = "../ipc" }
+spatializer = { path = "../spatializer" }
 console-subscriber = "0.2.0"
 rustc-hash = "1.1.0"
 parking_lot = "0.12.1"

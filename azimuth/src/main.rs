@@ -1,35 +1,30 @@
-pub mod handlers;
-
-use color_eyre::eyre::Result;
 use glam::Quat;
-use handlers::{PointerHandler, PulseReceiverCollector};
 use input_event_codes::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use ipc::receive_input_async_ipc;
-use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
+use spatializer::spatial_input_beam;
 use stardust_xr_fusion::{
-	client::Client,
-	core::values::{color::rgba_linear, Datamap, Vector2},
-	data::{PulseReceiver, PulseSender, PulseSenderAspect},
+	client::{Client, ClientHandle},
+	core::{
+		schemas::zbus::Connection,
+		values::{color::rgba_linear, Datamap, Vector2},
+	},
 	drawable::Lines,
-	fields::{FieldRefAspect, RayMarchResult},
 	input::{InputDataType, InputMethod, InputMethodAspect, Pointer},
-	node::NodeType,
 	objects::hmd,
-	root::{ClientState, FrameInfo, RootAspect, RootHandler},
+	root::{ClientState, RootAspect, RootEvent},
 	spatial::{SpatialAspect, SpatialRef, Transform},
-	HandlerWrapper,
+	AsyncEventHandle,
 };
 use stardust_xr_molecules::{
-	keyboard::{KeyboardEvent, KEYBOARD_MASK},
+	keyboard::KeyboardHandlerProxy,
 	lines::{circle, LineExt},
 };
-use std::{io::IsTerminal, sync::Arc, time::Duration};
-use tokio::{sync::watch, task::JoinSet};
-use tracing::{info, info_span};
+use std::{io::IsTerminal, sync::Arc};
+use tokio::sync::{mpsc, watch, Notify};
+use tracing::{debug_span, info, Instrument};
 
-// degrees per pixel, constant for now since i'm lazy
 const MOUSE_SENSITIVITY: f32 = 0.1;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -58,276 +53,266 @@ impl Default for PointerDatamap {
 	}
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-	if std::io::stdin().is_terminal() {
-		panic!("You need to pipe azimuth or eclipse's output into this e.g. `eclipse | azimuth`");
-	}
-	// console_subscriber::init();
-	color_eyre::install().unwrap();
-	let (client, event_loop) = Client::connect_with_async_loop()
-		.await
-		.expect("Couldn't connect");
-	let hmd = hmd(&client).await.unwrap();
+enum MouseEvent {
+	Move { delta: Vector2<f32> },
+	Button { button: u32, pressed: bool },
+	AxisContinuous { a: Vector2<f32> },
+	AxisDiscrete { a: Vector2<f32> },
+}
 
-	// Pointer stuff
+enum KeyboardEvent {
+	Key { map: u64, key: u32, pressed: bool },
+	KeyMap(u64),
+}
+
+#[tokio::main]
+async fn main() {
+	if std::io::stdin().is_terminal() {
+		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | azimuth`");
+	}
+	color_eyre::install().unwrap();
+
+	// Client setup
+	let client = Client::connect().await.expect("Couldn't connect");
+	let client_handle = client.handle();
+	let async_loop = client.async_event_loop();
+	let hmd = hmd(&client_handle).await.unwrap();
+
+	let dbus_connection = Connection::session().await.unwrap();
+
+	// Setup the visual pointer and reticle
 	let pointer = InputMethod::create(
-		client.get_root(),
+		client_handle.get_root(),
 		Transform::identity(),
 		InputDataType::Pointer(Pointer {
 			origin: [0.0; 3].into(),
 			orientation: Quat::IDENTITY.into(),
 			deepest_point: [0.0; 3].into(),
 		}),
-		&Datamap::from_typed(PointerDatamap::default())?,
-	)?;
-	let handler = PointerHandler::new(pointer.alias());
-	let pointer = pointer.wrap(handler)?;
-	let _ = pointer
-		.node()
-		.set_relative_transform(&hmd, Transform::from_translation([0.0; 3]));
+		&Datamap::from_typed(PointerDatamap::default()).unwrap(),
+	)
+	.unwrap();
+	let _ = pointer.set_relative_transform(&hmd, Transform::from_translation([0.0; 3]));
 
+	// Create the visual reticle
 	let line = circle(8, 0.0, 0.001)
 		.thickness(0.0025)
 		.color(rgba_linear!(1.0, 1.0, 1.0, 1.0));
-	let pointer_reticle = Lines::create(
-		pointer.node().as_ref(),
+	let _pointer_reticle = Lines::create(
+		&pointer,
 		Transform::from_translation([0.0, 0.0, -0.5]),
 		&[line],
-	)?;
+	)
+	.unwrap();
 
-	// Keyboard stuff
-	let keyboard_sender = PulseSender::create(
-		pointer.node().as_ref(),
-		Transform::identity(),
-		&KEYBOARD_MASK,
-	)?
-	.wrap(PulseReceiverCollector::default())?;
-	let (hovered_keyboard_tx, hovered_keyboard) = watch::channel::<Option<PulseReceiver>>(None);
+	// Event handling setup
+	let event_handle = Arc::new(Notify::new());
+	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
+	let (mouse_tx, mouse_rx) = mpsc::unbounded_channel::<MouseEvent>();
 	let (frame_count_tx, frame_count_rx) = watch::channel(0);
 
-	// doing the actual handling
-	let input_loop = tokio::task::spawn(input_loop(
-		client.clone(),
-		pointer.node().alias(),
-		keyboard_sender.node().alias(),
-		hovered_keyboard,
-		frame_count_rx,
+	// Spawn the main task loops
+	let frame_loop = tokio::task::spawn(handle_frame_events(
+		event_handle.clone(),
+		client_handle.clone(),
+		async_loop.get_event_handle(),
+		pointer.clone(),
+		hmd.clone(),
+		frame_count_tx.clone(),
 	));
-	tokio::spawn(reconnect_keyboard_loop(
-		pointer.node().alias(),
-		keyboard_sender.wrapped().clone(),
-		hovered_keyboard_tx,
+
+	let mouse_loop = tokio::task::spawn(handle_mouse_events(
+		pointer.clone(),
+		mouse_rx,
+		event_handle.clone(),
+		frame_count_rx.clone(),
 	));
-	let _client_root = client.get_root().alias().wrap(Root {
-		root: client.get_root().alias(),
-		hmd,
-		pointer,
-		pointer_reticle,
-		frame_count_tx,
-	})?;
+
+	let keyboard_loop =
+		tokio::task::spawn(
+			spatial_input_beam::<KeyboardHandlerProxy, KeyboardEvent, ()>(
+				dbus_connection,
+				pointer.clone().as_spatial().as_spatial_ref(),
+				keyboard_rx,
+				async |proxy, event, _| match event {
+					KeyboardEvent::KeyMap(keymap_id) => {
+						_ = proxy
+							.keymap(keymap_id)
+							.instrument(debug_span!("sending keymap"))
+							.await;
+					}
+					KeyboardEvent::Key { key, pressed, map } => {
+						_ = proxy
+							.keymap(map)
+							.instrument(debug_span!("sending keymap as part of button"))
+							.await;
+						_ = proxy
+							.key_state(key, pressed)
+							.instrument(debug_span!("sending keypress"))
+							.await;
+					}
+				},
+				async |_, _| {},
+				async |proxy| _ = proxy.reset().await,
+			),
+		);
+
+	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
 
 	tokio::select! {
 		biased;
-		_ = tokio::signal::ctrl_c() => Ok(()),
-		e = event_loop => e?.map_err(|e| e.into()),
-		_ = input_loop => Ok(()),
+		_ = tokio::signal::ctrl_c() => (),
+		_ = mouse_loop => (),
+		_ = keyboard_loop => (),
+		_ = input_loop => (),
+		_ = frame_loop => (),
 	}
 }
 
-async fn input_loop(
-	client: Arc<Client>,
+async fn handle_mouse_events(
 	pointer: InputMethod,
-	keyboard_sender: PulseSender,
-	hovered_keyboard: watch::Receiver<Option<PulseReceiver>>,
+	mut mouse_rx: mpsc::UnboundedReceiver<MouseEvent>,
+	event_handle: Arc<Notify>,
 	frame_count_rx: watch::Receiver<u32>,
 ) {
-	let mut keymap_id: Option<u64> = None;
-
 	let mut yaw = 0.0;
 	let mut pitch = 0.0;
-
-	let mut mouse_buttons = FxHashSet::default();
 	let mut pointer_datamap = PointerDatamap::default();
 	let mut old_frame_count = 0_u32;
-	// let mut past_time = Instant::now();
+	let mut mouse_buttons = FxHashSet::default();
 
-	while let Ok(message) = receive_input_async_ipc().await {
-		let span = info_span!("handle ipc message");
-		let _span_enter = span.enter();
+	loop {
+		event_handle.notified().await;
+
 		if *frame_count_rx.borrow() > old_frame_count {
 			old_frame_count = *frame_count_rx.borrow();
 			pointer_datamap.scroll_continuous = [0.0; 2].into();
 			pointer_datamap.scroll_discrete = [0.0; 2].into();
 		}
-		// println!(
-		// 	"time since last event: {}",
-		// 	past_time.elapsed().as_secs_f32()
-		// );
-		// past_time = Instant::now();
+
+		while let Ok(event) = mouse_rx.try_recv() {
+			match event {
+				MouseEvent::Move { delta } => {
+					yaw += delta.x * MOUSE_SENSITIVITY;
+					pitch += delta.y * MOUSE_SENSITIVITY;
+					pitch = pitch.clamp(-90.0, 90.0);
+
+					let rotation_x = Quat::from_rotation_x(-pitch.to_radians());
+					let rotation_y = Quat::from_rotation_y(-yaw.to_radians());
+					let _ = pointer
+						.set_local_transform(Transform::from_rotation(rotation_y * rotation_x));
+				}
+				MouseEvent::Button { button, pressed } => {
+					if button > 255 {
+						if pressed {
+							mouse_buttons.insert(button);
+						} else {
+							mouse_buttons.remove(&button);
+						}
+					}
+					pointer_datamap.raw_input_events.clone_from(&mouse_buttons);
+					match button {
+						BTN_LEFT!() => pointer_datamap.select = if pressed { 1.0 } else { 0.0 },
+						BTN_MIDDLE!() => pointer_datamap.middle = if pressed { 1.0 } else { 0.0 },
+						BTN_RIGHT!() => pointer_datamap.context = if pressed { 1.0 } else { 0.0 },
+						_ => pointer_datamap.grab = if pressed { 1.0 } else { 0.0 },
+					}
+					let _ =
+						pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
+				}
+				MouseEvent::AxisContinuous { a } => {
+					pointer_datamap.scroll_continuous.x += a.x;
+					pointer_datamap.scroll_continuous.y += a.y;
+					let _ =
+						pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
+				}
+				MouseEvent::AxisDiscrete { a } => {
+					pointer_datamap.scroll_discrete.x += a.x;
+					pointer_datamap.scroll_discrete.y += a.y;
+					let _ =
+						pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
+				}
+			}
+		}
+	}
+}
+
+// Keyboard events are now handled directly by spatial_input_beam
+
+async fn input_loop(
+	client: Arc<ClientHandle>,
+	keyboard_tx: mpsc::UnboundedSender<KeyboardEvent>,
+	mouse_tx: mpsc::UnboundedSender<MouseEvent>,
+) {
+	let mut keymap = None;
+
+	while let Ok(message) = receive_input_async_ipc()
+		.instrument(debug_span!("handling input ipc message"))
+		.await
+	{
 		match message {
-			ipc::Message::Keymap(keymap) => {
+			ipc::Message::Keymap(map) => {
 				info!("IPC keymap message");
-				let Ok(future) = client.register_xkb_keymap(keymap) else {
+				let Ok(future) = client.register_xkb_keymap(map) else {
 					continue;
 				};
 				let Ok(new_keymap_id) = future.await else {
 					continue;
 				};
-				keymap_id.replace(new_keymap_id);
+				keymap = Some(new_keymap_id);
+				let _ = keyboard_tx.send(KeyboardEvent::KeyMap(new_keymap_id));
 			}
 			ipc::Message::Key { keycode, pressed } => {
-				info!("IPC key message");
-				let Some(hovered_keyboard) = &*hovered_keyboard.borrow() else {
+				let Some(map) = keymap else {
 					continue;
 				};
-				let Some(keymap_id) = keymap_id else {
-					continue;
-				};
-				KeyboardEvent {
-					keyboard: (),
-					xkbv1: (),
-					keymap_id,
-					keys: vec![if pressed {
-						keycode as i32
-					} else {
-						-(keycode as i32)
-					}]
-					.into_iter()
-					.collect(),
-				}
-				.send_event(&keyboard_sender, &[hovered_keyboard])
+				let _ = keyboard_tx.send(KeyboardEvent::Key {
+					map,
+					key: keycode,
+					pressed,
+				});
 			}
 			ipc::Message::MouseMove(delta) => {
-				info!("IPC mouse move message");
-				yaw += delta.x * MOUSE_SENSITIVITY;
-				pitch += delta.y * MOUSE_SENSITIVITY;
-				pitch = pitch.clamp(-90.0, 90.0);
-
-				let rotation_x = Quat::from_rotation_x(-pitch.to_radians());
-				let rotation_y = Quat::from_rotation_y(-yaw.to_radians());
-				let _ =
-					pointer.set_local_transform(Transform::from_rotation(rotation_y * rotation_x));
+				let _ = mouse_tx.send(MouseEvent::Move { delta });
 			}
 			ipc::Message::MouseButton { button, pressed } => {
-				info!("IPC mouse button message");
-				if button > 255 {
-					if pressed {
-						mouse_buttons.insert(button);
-					} else {
-						mouse_buttons.remove(&button);
-					}
-				}
-				pointer_datamap.raw_input_events.clone_from(&mouse_buttons);
-				match button {
-					BTN_LEFT!() => {
-						pointer_datamap.select = if pressed { 1.0 } else { 0.0 };
-					}
-					BTN_MIDDLE!() => {
-						pointer_datamap.middle = if pressed { 1.0 } else { 0.0 };
-					}
-					BTN_RIGHT!() => {
-						pointer_datamap.context = if pressed { 1.0 } else { 0.0 };
-					}
-					_ => {
-						// idk why this number but that's what it spits out for side mousebuttons lol
-						pointer_datamap.grab = if pressed { 1.0 } else { 0.0 };
-					} // b => {
-					  // 	println!("Unknown mouse button {b}");
-					  // 	continue;
-					  // }
-				}
-				pointer
-					.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap())
-					.unwrap();
+				let _ = mouse_tx.send(MouseEvent::Button { button, pressed });
 			}
-			ipc::Message::MouseAxisContinuous(scroll) => {
-				info!("IPC mouse axis continuous message");
-				let scroll_continuous = &mut pointer_datamap.scroll_continuous;
-				*scroll_continuous = [
-					scroll_continuous.x + scroll.x,
-					scroll_continuous.y + scroll.y,
-				]
-				.into();
-				pointer
-					.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap())
-					.unwrap();
+			ipc::Message::MouseAxisContinuous(a) => {
+				let _ = mouse_tx.send(MouseEvent::AxisContinuous { a });
 			}
-			ipc::Message::MouseAxisDiscrete(scroll) => {
-				info!("IPC mouse axis discrete message");
-				let scroll_discrete = &mut pointer_datamap.scroll_discrete;
-				*scroll_discrete =
-					[scroll_discrete.x + scroll.x, scroll_discrete.y + scroll.y].into();
-				pointer
-					.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap())
-					.unwrap();
+			ipc::Message::MouseAxisDiscrete(a) => {
+				let _ = mouse_tx.send(MouseEvent::AxisDiscrete { a });
 			}
-			ipc::Message::ResetInput => (),
+			ipc::Message::ResetInput => {}
 			ipc::Message::Disconnect => break,
 		}
 	}
 }
 
-async fn reconnect_keyboard_loop(
+async fn handle_frame_events(
+	event_handle: Arc<Notify>,
+	client_handle: Arc<ClientHandle>,
+	async_event_handle: AsyncEventHandle,
 	pointer: InputMethod,
-	keyboard_sender: Arc<Mutex<PulseReceiverCollector>>,
-	hovered_keyboard_tx: watch::Sender<Option<PulseReceiver>>,
+	hmd: SpatialRef,
+	frame_count_tx: watch::Sender<u32>,
 ) {
 	loop {
-		let mut closest_hit: Option<(PulseReceiver, RayMarchResult)> = None;
-		let mut join = JoinSet::new();
-		for (receiver, field) in keyboard_sender.lock().0.values() {
-			let field = field.alias();
-			let pointer = pointer.alias();
-			let receiver = receiver.alias();
-			join.spawn(async move {
-				(
-					receiver,
-					field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]).await,
-				)
-			});
-		}
-		while let Some(res) = join.join_next().await {
-			let Ok((receiver, Ok(ray_info))) = res else {
-				continue;
-			};
-			if ray_info.min_distance > 0.0 || ray_info.deepest_point_distance <= 0.001 {
-				continue;
+		async_event_handle.wait().await;
+		match client_handle.get_root().recv_root_event() {
+			Some(RootEvent::Frame { info: _ }) => {
+				frame_count_tx.send_modify(|i| *i += 1);
+				let _ = pointer.set_relative_transform(&hmd, Transform::from_translation([0.0; 3]));
+				event_handle.notify_waiters();
 			}
-			if let Some((hit_receiver, hit_info)) = &mut closest_hit {
-				if ray_info.deepest_point_distance < hit_info.deepest_point_distance {
-					*hit_receiver = receiver;
-					*hit_info = ray_info;
-				}
-			} else {
-				closest_hit.replace((receiver, ray_info));
+			Some(RootEvent::Ping { response }) => {
+				response.send(Ok(()));
 			}
+			Some(RootEvent::SaveState { response }) => {
+				response.send(ClientState::from_root(client_handle.get_root()));
+			}
+			None => {}
 		}
-		let _ = hovered_keyboard_tx.send(closest_hit.map(|(r, _)| r));
-		tokio::time::sleep(Duration::from_secs_f64(0.1)).await
-	}
-}
-
-struct Root {
-	root: stardust_xr_fusion::root::Root,
-	hmd: SpatialRef,
-	pointer: HandlerWrapper<InputMethod, PointerHandler>,
-	pointer_reticle: Lines,
-	frame_count_tx: watch::Sender<u32>,
-}
-impl RootHandler for Root {
-	fn frame(&mut self, _info: FrameInfo) {
-		self.frame_count_tx.send_modify(|i| *i += 1);
-		let _ = self
-			.pointer
-			.node()
-			.set_relative_transform(&self.hmd, Transform::from_translation([0.0; 3]));
-		self.pointer
-			.wrapped()
-			.lock()
-			.update_pointer(self.pointer_reticle.alias());
-	}
-	fn save_state(&mut self) -> Result<ClientState> {
-		ClientState::from_root(&self.root)
 	}
 }
