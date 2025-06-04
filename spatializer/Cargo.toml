@@ -1,19 +1,13 @@
 [package]
-name = "simular"
+name = "spatializer"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[features]
-tracy = ["dep:tracing-tracy", "dep:tracy-client"]
 
 [dependencies]
 color-eyre = "0.6.2"
 glam = "0.30.0"
 mint = "0.5.9"
 ipc = { path = "../ipc" }
-spatializer = { path = "../spatializer" }
 console-subscriber = "0.2.0"
 parking_lot = "0.12.1"
 rustc-hash = "1.1.0"

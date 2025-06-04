@@ -1,18 +1,12 @@
 use color_eyre::Result;
 use glam::Vec2;
 use ipc::receive_input_async_ipc;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use spatializer::spatial_input_beam;
 use stardust_xr_fusion::{
 	client::Client,
 	core::values::Vector2,
-	fields::{FieldRef, FieldRefAspect},
-	objects::{
-		connect_client, hmd,
-		interfaces::FieldRefProxy,
-		object_registry::{ObjectInfo, ObjectRegistry},
-		FieldRefProxyExt,
-	},
+	objects::{connect_client, hmd},
 	root::{RootAspect, RootEvent},
 	ClientHandle,
 };
@@ -22,7 +16,6 @@ use std::{io::IsTerminal, sync::Arc};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug_span, Instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter};
-use zbus::{proxy::Defaults, Connection, Proxy};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PointerDatamap {
@@ -87,36 +80,40 @@ async fn main() -> Result<()> {
 		}
 	});
 
+	let hmd = hmd(&client_handle).await.unwrap();
+
 	let keyboard_loop =
-		tokio::task::spawn(spatialize_input::<KeyboardHandlerProxy, KeyboardEvent, ()>(
-			"org.stardustxr.XKBv1",
-			async |proxy, event, _| match event {
-				KeyboardEvent::KeyMap(keymap_id) => {
-					_ = proxy
-						.keymap(keymap_id)
-						.instrument(debug_span!("sending keymap"))
-						.await;
-				}
-				KeyboardEvent::Key { key, pressed, map } => {
-					_ = proxy
-						.keymap(map)
-						.instrument(debug_span!("sending keymap as part of button"))
-						.await;
-					_ = proxy
-						.key_state(key, pressed)
-						.instrument(debug_span!("sending keypress"))
-						.await;
-				}
-			},
-			async |_, _| {},
-			async |proxy| _ = proxy.reset().await,
-			conn.clone(),
-			event_handle.clone(),
-			client_handle.clone(),
-			keyboard_rx,
-		));
-	let mouse_loop = tokio::task::spawn(spatialize_input::<MouseHandlerProxy, MouseEvent, Vec2>(
-		"org.stardustxr.Mousev1",
+		tokio::task::spawn(
+			spatial_input_beam::<KeyboardHandlerProxy, KeyboardEvent, ()>(
+				conn.clone(),
+				hmd.clone(),
+				keyboard_rx,
+				async |proxy, event, _| match event {
+					KeyboardEvent::KeyMap(keymap_id) => {
+						_ = proxy
+							.keymap(keymap_id)
+							.instrument(debug_span!("sending keymap"))
+							.await;
+					}
+					KeyboardEvent::Key { key, pressed, map } => {
+						_ = proxy
+							.keymap(map)
+							.instrument(debug_span!("sending keymap as part of button"))
+							.await;
+						_ = proxy
+							.key_state(key, pressed)
+							.instrument(debug_span!("sending keypress"))
+							.await;
+					}
+				},
+				async |_, _| {},
+				async |proxy| _ = proxy.reset().await,
+			),
+		);
+	let mouse_loop = tokio::task::spawn(spatial_input_beam::<MouseHandlerProxy, MouseEvent, Vec2>(
+		conn.clone(),
+		hmd,
+		mouse_rx,
 		async |proxy, event, move_state: &mut Option<Vec2>| match event {
 			MouseEvent::Move { delta } => {
 				*move_state.get_or_insert(Vec2::ZERO) += Vec2::from(delta);
@@ -147,10 +144,6 @@ async fn main() -> Result<()> {
 				.await;
 		},
 		async |proxy| _ = proxy.reset().await,
-		conn.clone(),
-		event_handle.clone(),
-		client_handle.clone(),
-		mouse_rx,
 	));
 	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
 
@@ -163,98 +156,6 @@ async fn main() -> Result<()> {
 		e = frame_loop => e?,
 	};
 	Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn spatialize_input<P: From<Proxy<'static>> + Defaults + 'static, E, C>(
-	interface: &'static str,
-	handle_event: impl AsyncFn(&P, E, &mut Option<C>),
-	handle_cached_event: impl AsyncFn(&P, C),
-	reset: impl AsyncFn(&P),
-	conn: Connection,
-	event_handle: Arc<Notify>,
-	client: Arc<ClientHandle>,
-	mut events: mpsc::UnboundedReceiver<E>,
-) {
-	let conn = &conn;
-	let object_registry = ObjectRegistry::new(conn).await.unwrap();
-	let hmd = hmd(&client).await.unwrap();
-	let mut handler_cache = FxHashMap::<ObjectInfo, FieldRef>::default();
-	let mut last_handler = None;
-	loop {
-		event_handle.notified().await;
-		let handlers = object_registry.get_objects(interface);
-		let mut closest_distance = f32::INFINITY;
-		let mut closest_handler = None;
-		for handler in &handlers {
-			let field_ref = if let Some(cached) = handler_cache.get(handler) {
-				cached.clone()
-			} else {
-				let proxy = handler.to_typed_proxy::<FieldRefProxy>(conn).await.unwrap();
-				let Some(field_ref) = proxy.import(&client).await else {
-					eprintln!("field import was None");
-					continue;
-				};
-				handler_cache.insert(handler.clone(), field_ref.clone());
-				field_ref
-			};
-
-			let result = match field_ref
-				.ray_march(&hmd, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
-				.instrument(debug_span!("raymarching"))
-				.await
-			{
-				Ok(r) => r,
-				Err(err) => {
-					eprintln!("error while raymarching: {err}");
-					continue;
-				}
-			};
-
-			if result.deepest_point_distance > 0.0
-				&& result.min_distance < 0.05
-				&& result.deepest_point_distance < closest_distance
-			{
-				closest_distance = result.deepest_point_distance;
-				closest_handler = Some(handler);
-			}
-		}
-		handler_cache.retain(|handler, _| handlers.contains(handler));
-
-		if let Some(last) = last_handler.as_ref() {
-			if Some(last) != closest_handler {
-				match last.to_typed_proxy::<P>(conn).await {
-					Ok(proxy) => {
-						reset(&proxy).await;
-					}
-					Err(err) => {
-						eprintln!("unable to get {interface} proxy for last handler: {err}")
-					}
-				};
-			}
-		}
-		let mut cached_state = None;
-		if let Some(handler) = closest_handler {
-			let proxy = handler
-				.to_typed_proxy::<P>(conn)
-				.instrument(debug_span!("getting proxy"))
-				.await
-				.unwrap();
-			while let Ok(event) = events.try_recv() {
-				handle_event(&proxy, event, &mut cached_state)
-					.instrument(debug_span!("calling handler fn"))
-					.await
-			}
-			if let Some(cached_state) = cached_state {
-				handle_cached_event(&proxy, cached_state)
-					.instrument(debug_span!("calling cached handler"))
-					.await
-			}
-		} else {
-			while events.try_recv().is_ok() {}
-		}
-		last_handler = closest_handler.cloned();
-	}
 }
 
 enum KeyboardEvent {
