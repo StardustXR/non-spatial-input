@@ -1,7 +1,7 @@
-use glam::Quat;
+use glam::{Quat, Vec3};
 use input_event_codes::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use ipc::receive_input_async_ipc;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use spatializer::spatial_input_beam;
 use stardust_xr_fusion::{
@@ -11,7 +11,11 @@ use stardust_xr_fusion::{
 		values::{color::rgba_linear, Datamap, Vector2},
 	},
 	drawable::Lines,
-	input::{InputDataType, InputMethod, InputMethodAspect, Pointer},
+	fields::{Field, FieldRefAspect, RayMarchResult},
+	input::{
+		InputDataType, InputHandler, InputMethod, InputMethodAspect, InputMethodEvent, Pointer,
+	},
+	node::NodeType,
 	objects::hmd,
 	root::{ClientState, RootAspect, RootEvent},
 	spatial::{SpatialAspect, SpatialRef, Transform},
@@ -21,8 +25,11 @@ use stardust_xr_molecules::{
 	keyboard::KeyboardHandlerProxy,
 	lines::{circle, LineExt},
 };
-use std::{io::IsTerminal, sync::Arc};
-use tokio::sync::{mpsc, watch, Notify};
+use std::{f32::consts::FRAC_PI_2, io::IsTerminal, sync::Arc};
+use tokio::{
+	sync::{mpsc, watch, Notify},
+	task::JoinSet,
+};
 use tracing::{debug_span, info, Instrument};
 
 const MOUSE_SENSITIVITY: f32 = 0.1;
@@ -98,22 +105,22 @@ async fn main() {
 	let line = circle(8, 0.0, 0.001)
 		.thickness(0.0025)
 		.color(rgba_linear!(1.0, 1.0, 1.0, 1.0));
-	let _pointer_reticle = Lines::create(
+	let pointer_reticle = Lines::create(
 		&pointer,
-		Transform::from_translation([0.0, 0.0, -0.5]),
+		Transform::from_translation_rotation([0.0, 0.0, -0.5], Quat::from_rotation_x(FRAC_PI_2)),
 		&[line],
 	)
 	.unwrap();
 
 	// Event handling setup
-	let event_handle = Arc::new(Notify::new());
+	let frame_event = Arc::new(Notify::new());
 	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
 	let (mouse_tx, mouse_rx) = mpsc::unbounded_channel::<MouseEvent>();
 	let (frame_count_tx, frame_count_rx) = watch::channel(0);
 
 	// Spawn the main task loops
 	let frame_loop = tokio::task::spawn(handle_frame_events(
-		event_handle.clone(),
+		frame_event.clone(),
 		client_handle.clone(),
 		async_loop.get_event_handle(),
 		pointer.clone(),
@@ -124,8 +131,23 @@ async fn main() {
 	let mouse_loop = tokio::task::spawn(handle_mouse_events(
 		pointer.clone(),
 		mouse_rx,
-		event_handle.clone(),
+		frame_event.clone(),
 		frame_count_rx.clone(),
+	));
+
+	let (state_tx, state_rx) = watch::channel(MouseTargetState::default());
+
+	let input_method_events = tokio::task::spawn(input_method_events(
+		async_loop.get_event_handle(),
+		pointer.clone(),
+		state_tx,
+	));
+
+	let input_method_loop = tokio::task::spawn(input_method_loop(
+		frame_event.clone(),
+		state_rx,
+		pointer.clone(),
+		pointer_reticle,
 	));
 
 	let keyboard_loop =
@@ -162,6 +184,8 @@ async fn main() {
 	tokio::select! {
 		biased;
 		_ = tokio::signal::ctrl_c() => (),
+		_ = input_method_events => (),
+		_ = input_method_loop => (),
 		_ = mouse_loop => (),
 		_ = keyboard_loop => (),
 		_ = input_loop => (),
@@ -212,33 +236,162 @@ async fn handle_mouse_events(
 					}
 					pointer_datamap.raw_input_events.clone_from(&mouse_buttons);
 					match button {
-						BTN_LEFT!() => pointer_datamap.select = if pressed { 1.0 } else { 0.0 },
-						BTN_MIDDLE!() => pointer_datamap.middle = if pressed { 1.0 } else { 0.0 },
-						BTN_RIGHT!() => pointer_datamap.context = if pressed { 1.0 } else { 0.0 },
-						_ => pointer_datamap.grab = if pressed { 1.0 } else { 0.0 },
+						BTN_LEFT!() => {
+							pointer_datamap.select = pressed as u32 as f32;
+						}
+						BTN_MIDDLE!() => {
+							pointer_datamap.middle = pressed as u32 as f32;
+						}
+						BTN_RIGHT!() => {
+							pointer_datamap.context = pressed as u32 as f32;
+							pointer_datamap.grab = pressed as u32 as f32;
+						}
+						_ => {}
 					}
-					let _ =
-						pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
 				}
 				MouseEvent::AxisContinuous { a } => {
 					pointer_datamap.scroll_continuous.x += a.x;
 					pointer_datamap.scroll_continuous.y += a.y;
-					let _ =
-						pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
 				}
 				MouseEvent::AxisDiscrete { a } => {
 					pointer_datamap.scroll_discrete.x += a.x;
 					pointer_datamap.scroll_discrete.y += a.y;
-					let _ =
-						pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
 				}
 			}
+		}
+		dbg!(&pointer_datamap);
+		let _ = pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
+	}
+}
+
+#[derive(Clone, Default)]
+struct MouseTargetState {
+	handlers: FxHashMap<u64, (InputHandler, Field)>,
+	capture_requests: FxHashSet<u64>,
+	captured: Option<u64>,
+}
+
+async fn input_method_events(
+	async_event_handle: AsyncEventHandle,
+	pointer: InputMethod,
+	state_tx: watch::Sender<MouseTargetState>,
+) {
+	let mut state = MouseTargetState::default();
+
+	loop {
+		async_event_handle.wait().await;
+		let mut state_changed = false;
+
+		while let Some(event) = pointer.recv_input_method_event() {
+			state_changed = true;
+			match event {
+				InputMethodEvent::CreateHandler { handler, field } => {
+					state.handlers.insert(handler.id(), (handler, field));
+				}
+				InputMethodEvent::RequestCaptureHandler { id } => {
+					state.capture_requests.insert(id);
+				}
+				InputMethodEvent::DestroyHandler { id } => {
+					state.handlers.remove(&id);
+				}
+			}
+		}
+
+		if state_changed {
+			let _ = state_tx.send(state.clone());
+		}
+	}
+}
+
+async fn input_method_loop(
+	frame_event: Arc<Notify>,
+	state_rx: watch::Receiver<MouseTargetState>,
+	pointer: InputMethod,
+	pointer_reticle: Lines,
+) {
+	loop {
+		frame_event.notified().await;
+
+		let mut state = state_rx.borrow().clone();
+
+		if let Some(captured_id) = state.captured {
+			if !state.capture_requests.contains(&captured_id) {
+				state.captured = None;
+			}
+		}
+		if state.captured.is_none() {
+			state.captured = state.capture_requests.drain().next();
+		}
+		if let Some((captured, _)) = state.captured.and_then(|id| state.handlers.get(&id)) {
+			pointer.set_handler_order(&[captured.clone()]).unwrap();
+			pointer.set_captures(&[captured.clone()]).unwrap();
+			continue;
+		}
+		let _ = pointer.set_captures(&[]);
+
+		let mut join = JoinSet::new();
+		for (handler, field) in state.handlers.values() {
+			let handler = handler.clone();
+			let field = field.clone();
+			let pointer = pointer.clone();
+			join.spawn(async move {
+				(
+					handler,
+					field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]).await,
+				)
+			});
+		}
+
+		let mut handlers: Vec<(InputHandler, RayMarchResult)> = Vec::new();
+		while let Some(res) = join.join_next().await {
+			let Ok((handler, Ok(ray_info))) = res else {
+				continue;
+			};
+			if ray_info.min_distance > 0.0 {
+				continue;
+			}
+			if ray_info.deepest_point_distance < 0.01 {
+				continue;
+			}
+			handlers.push((handler, ray_info));
+		}
+		let closest_hits = handlers
+			.into_iter()
+			.map(|(a, b)| (vec![a], b))
+			// now collect all handlers that are same distance if they're the closest
+			.reduce(|(mut handlers_a, result_a), (handlers_b, result_b)| {
+				if (result_a.deepest_point_distance - result_b.deepest_point_distance).abs() < 0.001
+				{
+					// distance is basically the same
+					handlers_a.extend(handlers_b);
+					(handlers_a, result_a)
+				} else if result_a.deepest_point_distance < result_b.deepest_point_distance {
+					(handlers_a, result_a)
+				} else {
+					(handlers_b, result_b)
+				}
+			});
+
+		if let Some((hit_handlers, hit_info)) = closest_hits {
+			let _ = pointer.set_handler_order(hit_handlers.as_slice());
+			let _ = pointer_reticle.set_relative_transform(
+				&pointer,
+				Transform::from_translation(
+					Vec3::from(hit_info.ray_origin)
+						+ Vec3::from(hit_info.ray_direction)
+							* hit_info.deepest_point_distance
+							* 0.95,
+				),
+			);
+		} else {
+			let _ = pointer.set_handler_order(&[]);
+			let _ = pointer_reticle
+				.set_relative_transform(&pointer, Transform::from_translation([0.0, 0.0, -0.5]));
 		}
 	}
 }
 
 // Keyboard events are now handled directly by spatial_input_beam
-
 async fn input_loop(
 	client: Arc<ClientHandle>,
 	keyboard_tx: mpsc::UnboundedSender<KeyboardEvent>,
@@ -291,7 +444,7 @@ async fn input_loop(
 }
 
 async fn handle_frame_events(
-	event_handle: Arc<Notify>,
+	frame_handle: Arc<Notify>,
 	client_handle: Arc<ClientHandle>,
 	async_event_handle: AsyncEventHandle,
 	pointer: InputMethod,
@@ -304,7 +457,7 @@ async fn handle_frame_events(
 			Some(RootEvent::Frame { info: _ }) => {
 				frame_count_tx.send_modify(|i| *i += 1);
 				let _ = pointer.set_relative_transform(&hmd, Transform::from_translation([0.0; 3]));
-				event_handle.notify_waiters();
+				frame_handle.notify_waiters();
 			}
 			Some(RootEvent::Ping { response }) => {
 				response.send(Ok(()));
