@@ -1,7 +1,7 @@
+use crate::wayland::WlHandler;
 use as_raw_xcb_connection::{xcb_connection_t, ValidConnection};
-use glam::{vec2, Vec2};
+use glam::vec2;
 use ipc::{send_input_ipc, Message};
-use map_range::MapRange;
 use softbuffer::Surface;
 use std::process::exit;
 use std::{num::NonZeroU32, rc::Rc};
@@ -25,16 +25,6 @@ use xkbcommon::xkb::{
 	Keymap, KEYMAP_COMPILE_NO_FLAGS, KEYMAP_FORMAT_TEXT_V1,
 };
 
-use crate::wayland::WlHandler;
-
-fn line_dist(p: Vec2, l1: Vec2, l2: Vec2, thickness: f32) -> f32 {
-	let pa = p - l1;
-	let ba = l2 - l1;
-	let t = pa.dot(ba) / ba.dot(ba);
-	let h = t.clamp(0.0, 1.0);
-	(pa - (ba * h)).length() - thickness
-}
-
 pub struct InputWindow {
 	window: Rc<Window>,
 	surface: Surface<Rc<Window>, Rc<Window>>,
@@ -44,11 +34,12 @@ pub struct InputWindow {
 }
 impl InputWindow {
 	pub fn new(event_loop: &EventLoop<()>) -> Self {
-		let size = Size::Logical([128, 128].into());
+		let size = Size::Logical([400, 300].into());
 		let window = Rc::new(
 			WindowBuilder::new()
 				.with_title("Manifold")
-				.with_min_inner_size(size)
+				.with_inner_size(size)
+				.with_resizable(false)
 				.build(event_loop)
 				.unwrap(),
 		);
@@ -178,8 +169,8 @@ impl InputWindow {
 
 	fn redraw(&mut self) {
 		let delta = self.mouse_delta.unwrap_or_default();
-
 		let window_size = self.window.inner_size();
+
 		self.surface
 			.resize(
 				NonZeroU32::new(window_size.width).unwrap(),
@@ -188,44 +179,49 @@ impl InputWindow {
 			.unwrap();
 		let mut buffer = self.surface.buffer_mut().unwrap();
 
-		let delta = vec2(delta.x as f32, delta.y as f32);
-		let window_center = vec2(
-			window_size.width as f32 / 2.0,
-			window_size.height as f32 / 2.0,
-		);
+		// Clear buffer
+		buffer.fill(0);
 
-		let thickness = 10.0;
+		let center_x = (window_size.width / 2) as usize;
+		let center_y = (window_size.height / 2) as usize;
 
 		if delta.x == 0.0 && delta.y == 0.0 {
-			buffer.fill(0);
-			//Draw a dot in the center
-			let color = match self.grabbed {
-				true => 0x00FF00,
-				false => 0xFF0000,
-			};
-			for x in 0..(thickness as u32) {
-				for y in 0..(thickness as u32) {
-					let x = (window_center.x - thickness / 2.0 + x as f32) as u32;
-					let y = (window_center.y - thickness / 2.0 + y as f32) as u32;
-					buffer[(x + (y * window_size.width)) as usize] = color;
+			// Just draw a colored dot in center
+			let color = if self.grabbed { 0x00FF00 } else { 0xFF0000 };
+			let dot_size = 5;
+			for y in (center_y - dot_size)..(center_y + dot_size) {
+				for x in (center_x - dot_size)..(center_x + dot_size) {
+					if x < window_size.width as usize && y < window_size.height as usize {
+						buffer[x + (y * window_size.width as usize)] = color;
+					}
 				}
 			}
-			buffer.present().unwrap();
-			return;
-		}
+		} else {
+			// Draw line in direction of movement
+			let movement = vec2(delta.x as f32, delta.y as f32) * 20.0;
 
-		let l1 = window_center;
-		let l2 = window_center + (delta * 4.0);
-		for x in 0..window_size.width {
-			for y in 0..window_size.height {
-				let dist = line_dist(vec2(x as f32, y as f32), l1, l2, thickness);
-				let intensity = dist.map_range(0.5..-0.5, 0.0..1.0).clamp(0.0, 1.0);
-				let intensity_u8 = (intensity * 255.0) as u32;
-				// let intensity_u8 = 255;
-				buffer[(x + (y * window_size.width)) as usize] =
-					intensity_u8 | (intensity_u8 << 8) | (intensity_u8 << 16);
+			// Draw line in steps
+			let steps = 40;
+			let thickness = 3; // How many pixels thick to make the line
+			for t in 0..steps {
+				let fraction = (t as f32) / (steps as f32);
+				let point = movement * fraction;
+				let center_point_x = (center_x as f32 + point.x) as isize;
+				let center_point_y = (center_y as f32 + point.y) as isize;
+
+				// Draw a square of pixels around each point
+				for dy in -thickness..=thickness {
+					for dx in -thickness..=thickness {
+						let x = (center_point_x + dx) as usize;
+						let y = (center_point_y + dy) as usize;
+						if x < window_size.width as usize && y < window_size.height as usize {
+							buffer[x + (y * window_size.width as usize)] = 0xFFFFFF;
+						}
+					}
+				}
 			}
 		}
+
 		buffer.present().unwrap();
 	}
 
