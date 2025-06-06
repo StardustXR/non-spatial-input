@@ -119,7 +119,7 @@ async fn main() {
 	let (frame_count_tx, frame_count_rx) = watch::channel(0);
 
 	// Spawn the main task loops
-	let frame_loop = tokio::task::spawn(handle_frame_events(
+	tokio::task::spawn(handle_frame_events(
 		frame_event.clone(),
 		client_handle.clone(),
 		async_loop.get_event_handle(),
@@ -128,7 +128,7 @@ async fn main() {
 		frame_count_tx.clone(),
 	));
 
-	let mouse_loop = tokio::task::spawn(handle_mouse_events(
+	tokio::task::spawn(handle_mouse_events(
 		pointer.clone(),
 		mouse_rx,
 		frame_event.clone(),
@@ -137,59 +137,53 @@ async fn main() {
 
 	let (state_tx, state_rx) = watch::channel(MouseTargetState::default());
 
-	let input_method_events = tokio::task::spawn(input_method_events(
+	tokio::task::spawn(input_method_events(
 		async_loop.get_event_handle(),
 		pointer.clone(),
 		state_tx,
 	));
 
-	let input_method_loop = tokio::task::spawn(input_method_loop(
+	tokio::task::spawn(input_method_loop(
 		frame_event.clone(),
 		state_rx,
 		pointer.clone(),
 		pointer_reticle,
 	));
 
-	let keyboard_loop =
-		tokio::task::spawn(
-			spatial_input_beam::<KeyboardHandlerProxy, KeyboardEvent, ()>(
-				dbus_connection,
-				pointer.clone().as_spatial().as_spatial_ref(),
-				keyboard_rx,
-				async |proxy, event, _| match event {
-					KeyboardEvent::KeyMap(keymap_id) => {
-						_ = proxy
-							.keymap(keymap_id)
-							.instrument(debug_span!("sending keymap"))
-							.await;
-					}
-					KeyboardEvent::Key { key, pressed, map } => {
-						_ = proxy
-							.keymap(map)
-							.instrument(debug_span!("sending keymap as part of button"))
-							.await;
-						_ = proxy
-							.key_state(key, pressed)
-							.instrument(debug_span!("sending keypress"))
-							.await;
-					}
-				},
-				async |_, _| {},
-				async |proxy| _ = proxy.reset().await,
-			),
-		);
+	tokio::task::spawn(
+		spatial_input_beam::<KeyboardHandlerProxy, KeyboardEvent, ()>(
+			dbus_connection,
+			pointer.clone().as_spatial().as_spatial_ref(),
+			keyboard_rx,
+			async |proxy, event, _| match event {
+				KeyboardEvent::KeyMap(keymap_id) => {
+					_ = proxy
+						.keymap(keymap_id)
+						.instrument(debug_span!("sending keymap"))
+						.await;
+				}
+				KeyboardEvent::Key { key, pressed, map } => {
+					_ = proxy
+						.keymap(map)
+						.instrument(debug_span!("sending keymap as part of button"))
+						.await;
+					_ = proxy
+						.key_state(key, pressed)
+						.instrument(debug_span!("sending keypress"))
+						.await;
+				}
+			},
+			async |_, _| {},
+			async |proxy| _ = proxy.reset().await,
+		),
+	);
 
 	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
 
 	tokio::select! {
 		biased;
 		_ = tokio::signal::ctrl_c() => (),
-		_ = input_method_events => (),
-		_ = input_method_loop => (),
-		_ = mouse_loop => (),
-		_ = keyboard_loop => (),
 		_ = input_loop => (),
-		_ = frame_loop => (),
 	}
 }
 
@@ -282,15 +276,19 @@ async fn input_method_events(
 			while let Some(event) = pointer.recv_input_method_event() {
 				match event {
 					InputMethodEvent::CreateHandler { handler, field } => {
-						println!("new handler!!");
+						// println!("new handler {}!!", handler.id());
 						state.handlers.insert(handler.id(), (handler, field));
 					}
 					InputMethodEvent::RequestCaptureHandler { id } => {
-						println!("handler {id} requests capture!!");
+						// println!("handler {id} requests capture!!");
 						state.capture_requests.insert(id);
 					}
+					InputMethodEvent::ReleaseHandler { id } => {
+						// println!("handler {id} releases capture!!");
+						state.capture_requests.remove(&id);
+					}
 					InputMethodEvent::DestroyHandler { id } => {
-						println!("handler {id} deleted!!");
+						// println!("handler {id} deleted!!");
 						state.handlers.remove(&id);
 					}
 				}
@@ -315,6 +313,7 @@ async fn input_method_loop(
 				state.captured = None;
 			}
 		}
+		// TODO: make this proper instead of just picking the first thing that wants capture
 		if state.captured.is_none() {
 			state.captured = state.capture_requests.drain().next();
 		}
