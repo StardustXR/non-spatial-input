@@ -10,7 +10,7 @@ use stardust_xr_fusion::{
 		schemas::zbus::Connection,
 		values::{color::rgba_linear, Datamap, Vector2},
 	},
-	drawable::Lines,
+	drawable::{Lines, LinesAspect},
 	fields::{Field, FieldRefAspect, RayMarchResult},
 	input::{
 		InputDataType, InputHandler, InputMethod, InputMethodAspect, InputMethodEvent, Pointer,
@@ -259,7 +259,6 @@ async fn handle_mouse_events(
 				}
 			}
 		}
-		dbg!(&pointer_datamap);
 		let _ = pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
 	}
 }
@@ -276,30 +275,27 @@ async fn input_method_events(
 	pointer: InputMethod,
 	state_tx: watch::Sender<MouseTargetState>,
 ) {
-	let mut state = MouseTargetState::default();
-
 	loop {
 		async_event_handle.wait().await;
-		let mut state_changed = false;
 
-		while let Some(event) = pointer.recv_input_method_event() {
-			state_changed = true;
-			match event {
-				InputMethodEvent::CreateHandler { handler, field } => {
-					state.handlers.insert(handler.id(), (handler, field));
-				}
-				InputMethodEvent::RequestCaptureHandler { id } => {
-					state.capture_requests.insert(id);
-				}
-				InputMethodEvent::DestroyHandler { id } => {
-					state.handlers.remove(&id);
+		state_tx.send_modify(|state| {
+			while let Some(event) = pointer.recv_input_method_event() {
+				match event {
+					InputMethodEvent::CreateHandler { handler, field } => {
+						println!("new handler!!");
+						state.handlers.insert(handler.id(), (handler, field));
+					}
+					InputMethodEvent::RequestCaptureHandler { id } => {
+						println!("handler {id} requests capture!!");
+						state.capture_requests.insert(id);
+					}
+					InputMethodEvent::DestroyHandler { id } => {
+						println!("handler {id} deleted!!");
+						state.handlers.remove(&id);
+					}
 				}
 			}
-		}
-
-		if state_changed {
-			let _ = state_tx.send(state.clone());
-		}
+		});
 	}
 }
 
@@ -322,11 +318,18 @@ async fn input_method_loop(
 		if state.captured.is_none() {
 			state.captured = state.capture_requests.drain().next();
 		}
+		let line = circle(8, 0.0, 0.001).thickness(0.0025);
 		if let Some((captured, _)) = state.captured.and_then(|id| state.handlers.get(&id)) {
 			pointer.set_handler_order(&[captured.clone()]).unwrap();
 			pointer.set_captures(&[captured.clone()]).unwrap();
+			// Change reticle color to green when captured
+			pointer_reticle
+				.set_lines(&[line.color(rgba_linear!(0.0, 1.0, 0.0, 1.0))])
+				.unwrap();
 			continue;
 		}
+		// Reset to white color when not captured
+		pointer_reticle.set_lines(&[line]).unwrap();
 		let _ = pointer.set_captures(&[]);
 
 		let mut join = JoinSet::new();
