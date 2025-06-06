@@ -135,9 +135,9 @@ impl InputWindow {
 			WindowEvent::MouseInput { state, button, .. } => self.handle_mouse_input(state, button),
 			WindowEvent::MouseWheel { delta, .. } => match delta {
 				MouseScrollDelta::LineDelta(x, y) => {
-					send_input_ipc(Message::MouseAxisContinuous(vec2(x, y).into()))
+					send_input_ipc(Message::MouseAxisDiscrete(vec2(x, y).into()))
 				}
-				MouseScrollDelta::PixelDelta(p) => send_input_ipc(Message::MouseAxisDiscrete(
+				MouseScrollDelta::PixelDelta(p) => send_input_ipc(Message::MouseAxisContinuous(
 					vec2(p.x as f32, p.y as f32).into(),
 				)),
 			},
