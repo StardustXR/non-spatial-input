@@ -19,3 +19,6 @@ branch = "dev"
 [workspace.dependencies.stardust-xr-molecules]
 git = "https://github.com/StardustXR/molecules.git"
 branch = "dev"
+
+[patch.crates-io]
+stardust-xr-schemas = { git = "https://github.com/StardustXR/core.git", branch = "dev" }
