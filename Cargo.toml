@@ -19,6 +19,9 @@ tokio = { version = "1.32.0", features = [
     "sync",
 ] }
 
+[workspace.dependencies.stardust-xr-schemas]
+git = "https://github.com/StardustXR/core.git"
+branch = "dev"
 [workspace.dependencies.stardust-xr-fusion]
 features = ["keymap"]
 git = "https://github.com/StardustXR/core.git"

@@ -18,7 +18,7 @@ softbuffer = "0.4.2"
 winit = "0.29.15"
 input-event-codes = "5.16.8"
 mint = { version = "0.5.9" }
-stardust-xr-schemas = "1.5.3"
+stardust-xr-schemas = { workspace = true }
 ctrlc = "3.4.4"
 map-range = "0.1.2"
 glam = { version = "0.27.0", features = ["mint"] }

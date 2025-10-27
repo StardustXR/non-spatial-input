@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 						event_handle.notify_waiters();
 					}
 					Some(RootEvent::Ping { response }) => {
-						response.send(Ok(()));
+						response.send_ok(());
 					}
 					Some(RootEvent::SaveState { response: _ }) => {
 						// no state to save
@@ -182,10 +182,7 @@ async fn input_loop(
 	{
 		match message {
 			ipc::Message::Keymap(map) => {
-				let Ok(future) = client.register_xkb_keymap(map) else {
-					continue;
-				};
-				let Ok(new_keymap_id) = future.await else {
+				let Ok(new_keymap_id) = client.register_xkb_keymap(map).await else {
 					continue;
 				};
 				_ = key_changed_event.send(KeyboardEvent::KeyMap(new_keymap_id));

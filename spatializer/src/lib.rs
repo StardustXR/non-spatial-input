@@ -5,9 +5,7 @@ use stardust_xr_fusion::{
 	fields::{FieldRef, FieldRefAspect},
 	node::NodeType,
 	objects::{
-		interfaces::FieldRefProxy,
-		object_registry::{ObjectInfo, ObjectRegistry},
-		FieldRefProxyExt,
+		interfaces::FieldRefProxy, object_registry::ObjectRegistry, FieldRefProxyExt, ObjectInfo,
 	},
 	spatial::{SpatialRef, SpatialRefAspect},
 };
@@ -37,7 +35,7 @@ pub async fn spatial_beam_target(
 				.to_typed_proxy::<FieldRefProxy>(&conn)
 				.await
 				.unwrap();
-			let Some(field_ref) = proxy.import(&beam_origin.client().unwrap()).await else {
+			let Some(field_ref) = proxy.import(beam_origin.client()).await else {
 				eprintln!("field import was None");
 				continue;
 			};
@@ -94,7 +92,7 @@ pub async fn spatial_input_beam<P: From<Proxy<'static>> + Defaults + Clone + 'st
 	reset: impl AsyncFn(&P),
 ) {
 	let conn = &conn;
-	let object_registry = ObjectRegistry::new(conn).await.unwrap();
+	let object_registry = ObjectRegistry::new(conn).await;
 	let mut field_cache = FxHashMap::<ObjectInfo, FieldRef>::default();
 	let mut last_handler: Option<ObjectInfo> = None;
 	let mut buf = Vec::new();
@@ -115,14 +113,14 @@ pub async fn spatial_input_beam<P: From<Proxy<'static>> + Defaults + Clone + 'st
 			continue;
 		};
 		let closest_handler = closest_handler_object
-			.to_typed_proxy::<P>(&conn)
+			.to_typed_proxy::<P>(conn)
 			.instrument(debug_span!("getting proxy"))
 			.await;
 
 		if let Some(last) = last_handler.take() {
 			if last != closest_handler_object {
 				if let Ok(last) = last
-					.to_typed_proxy::<P>(&conn)
+					.to_typed_proxy::<P>(conn)
 					.instrument(debug_span!("getting proxy"))
 					.await
 				{

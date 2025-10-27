@@ -25,7 +25,7 @@ use stardust_xr_molecules::{
 	keyboard::KeyboardHandlerProxy,
 	lines::{circle, LineExt},
 };
-use std::{f32::consts::FRAC_PI_2, io::IsTerminal, sync::Arc};
+use std::{f32::consts::FRAC_PI_2, io::IsTerminal, slice, sync::Arc};
 use tokio::{
 	sync::{mpsc, watch, Notify},
 	task::JoinSet,
@@ -319,8 +319,10 @@ async fn input_method_loop(
 		}
 		let line = circle(8, 0.0, 0.001).thickness(0.0025);
 		if let Some((captured, _)) = state.captured.and_then(|id| state.handlers.get(&id)) {
-			pointer.set_handler_order(&[captured.clone()]).unwrap();
-			pointer.set_captures(&[captured.clone()]).unwrap();
+			pointer
+				.set_handler_order(slice::from_ref(captured))
+				.unwrap();
+			pointer.set_captures(slice::from_ref(captured)).unwrap();
 			// Change reticle color to green when captured
 			pointer_reticle
 				.set_lines(&[line.color(rgba_linear!(0.0, 1.0, 0.0, 1.0))])
@@ -408,10 +410,7 @@ async fn input_loop(
 		match message {
 			ipc::Message::Keymap(map) => {
 				info!("IPC keymap message");
-				let Ok(future) = client.register_xkb_keymap(map) else {
-					continue;
-				};
-				let Ok(new_keymap_id) = future.await else {
+				let Ok(new_keymap_id) = client.register_xkb_keymap(map).await else {
 					continue;
 				};
 				keymap = Some(new_keymap_id);
@@ -462,7 +461,7 @@ async fn handle_frame_events(
 				frame_handle.notify_waiters();
 			}
 			Some(RootEvent::Ping { response }) => {
-				response.send(Ok(()));
+				response.send_ok(());
 			}
 			Some(RootEvent::SaveState { response }) => {
 				response.send(ClientState::from_root(client_handle.get_root()));
