@@ -245,11 +245,11 @@ async fn handle_mouse_events(
 				}
 				MouseEvent::AxisContinuous { a } => {
 					pointer_datamap.scroll_continuous.x += a.x;
-					pointer_datamap.scroll_continuous.y += a.y;
+					pointer_datamap.scroll_continuous.y -= a.y;
 				}
 				MouseEvent::AxisDiscrete { a } => {
 					pointer_datamap.scroll_discrete.x += a.x;
-					pointer_datamap.scroll_discrete.y += a.y;
+					pointer_datamap.scroll_discrete.y -= a.y;
 				}
 			}
 		}

@@ -107,20 +107,20 @@ async fn main() -> Result<()> {
 			}
 			MouseEvent::AxisContinuous { a } => {
 				_ = proxy
-					.scroll_continuous((a.x, a.y))
+					.scroll_continuous((a.x, -a.y))
 					.instrument(debug_span!("sending mouse scroll continuos"))
 					.await;
 			}
 			MouseEvent::AxisDiscrete { a } => {
 				_ = proxy
-					.scroll_discrete((a.x, a.y))
+					.scroll_discrete((a.x, -a.y))
 					.instrument(debug_span!("sending mouse scroll discrete"))
 					.await;
 			}
 		},
 		async |proxy, delta| {
 			_ = proxy
-				.motion((delta.x, delta.y))
+				.motion((delta.x, -delta.y))
 				.instrument(debug_span!("sending mouse motion"))
 				.await;
 		},
