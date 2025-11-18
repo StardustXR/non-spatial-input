@@ -1,7 +1,6 @@
 use color_eyre::Result;
 use glam::Vec2;
 use ipc::receive_input_async_ipc;
-use serde::{Deserialize, Serialize};
 use spatializer::spatial_input_beam;
 use stardust_xr_fusion::{
 	client::Client,
@@ -16,24 +15,6 @@ use std::{io::IsTerminal, sync::Arc};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug_span, Instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter};
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PointerDatamap {
-	select: f32,
-	grab: f32,
-	scroll_continuous: Vector2<f32>,
-	scroll_discrete: Vector2<f32>,
-}
-impl Default for PointerDatamap {
-	fn default() -> Self {
-		Self {
-			select: 0.0,
-			grab: 0.0,
-			scroll_continuous: [0.0; 2].into(),
-			scroll_discrete: [0.0; 2].into(),
-		}
-	}
-}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {

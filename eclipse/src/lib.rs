@@ -92,7 +92,7 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 						)
 					}
 					input::Event::Pointer(PointerEvent::ScrollWheel(s)) => {
-						Message::MouseAxisContinuous(
+						Message::MouseAxisDiscrete(
 							[
 								s.scroll_value_v120(Axis::Horizontal) as f32 / 120.0,
 								s.scroll_value_v120(Axis::Vertical) as f32 / 120.0,
