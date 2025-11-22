@@ -77,7 +77,6 @@ async fn main() {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | azimuth`");
 	}
-	color_eyre::install().unwrap();
 
 	// Client setup
 	let client = Client::connect().await.expect("Couldn't connect");

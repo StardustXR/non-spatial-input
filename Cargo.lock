@@ -428,7 +428,6 @@ dependencies = [
 name = "azimuth"
 version = "0.1.0"
 dependencies = [
- "color-eyre",
  "console-subscriber 0.2.0",
  "glam 0.30.8",
  "input-event-codes",
