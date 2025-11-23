@@ -118,7 +118,7 @@ async fn main() {
 	let (frame_count_tx, frame_count_rx) = watch::channel(0);
 
 	// Spawn the main task loops
-	tokio::task::spawn(handle_frame_events(
+	let frame_loop = tokio::task::spawn(handle_frame_events(
 		frame_event.clone(),
 		client_handle.clone(),
 		async_loop.get_event_handle(),
@@ -137,7 +137,7 @@ async fn main() {
 	let (state_tx, state_rx) = watch::channel(MouseTargetState::default());
 
 	tokio::task::spawn(input_method_events(
-		async_loop.get_event_handle(),
+		frame_event.clone(),
 		pointer.clone(),
 		state_tx,
 	));
@@ -177,12 +177,12 @@ async fn main() {
 		),
 	);
 
-	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
+	tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
 
 	tokio::select! {
 		biased;
 		_ = tokio::signal::ctrl_c() => (),
-		_ = input_loop => (),
+		_ = frame_loop => (),
 	}
 }
 
@@ -260,16 +260,17 @@ async fn handle_mouse_events(
 struct MouseTargetState {
 	handlers: FxHashMap<u64, (InputHandler, Field)>,
 	capture_requests: FxHashSet<u64>,
+	release_requests: FxHashSet<u64>,
 	captured: Option<u64>,
 }
 
 async fn input_method_events(
-	async_event_handle: AsyncEventHandle,
+	frame_event: Arc<Notify>,
 	pointer: InputMethod,
 	state_tx: watch::Sender<MouseTargetState>,
 ) {
 	loop {
-		async_event_handle.wait().await;
+		frame_event.notified().await;
 
 		state_tx.send_modify(|state| {
 			while let Some(event) = pointer.recv_input_method_event() {
@@ -281,10 +282,12 @@ async fn input_method_events(
 					InputMethodEvent::RequestCaptureHandler { id } => {
 						// println!("handler {id} requests capture!!");
 						state.capture_requests.insert(id);
+						state.release_requests.remove(&id);
 					}
 					InputMethodEvent::ReleaseHandler { id } => {
 						// println!("handler {id} releases capture!!");
 						state.capture_requests.remove(&id);
+						state.release_requests.insert(id);
 					}
 					InputMethodEvent::DestroyHandler { id } => {
 						// println!("handler {id} deleted!!");
@@ -308,7 +311,7 @@ async fn input_method_loop(
 		let mut state = state_rx.borrow().clone();
 
 		if let Some(captured_id) = state.captured {
-			if !state.capture_requests.contains(&captured_id) {
+			if state.release_requests.contains(&captured_id) {
 				state.captured = None;
 			}
 		}
