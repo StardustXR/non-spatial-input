@@ -85,8 +85,12 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 					input::Event::Pointer(PointerEvent::ScrollContinuous(s)) => {
 						Message::MouseAxisContinuous(
 							[
-								s.scroll_value(Axis::Horizontal) as f32,
-								s.scroll_value(Axis::Vertical) as f32,
+								s.has_axis(Axis::Horizontal)
+									.then(|| s.scroll_value(Axis::Horizontal) as f32)
+									.unwrap_or(0.0),
+								s.has_axis(Axis::Vertical)
+									.then(|| s.scroll_value(Axis::Vertical) as f32)
+									.unwrap_or(0.0),
 							]
 							.into(),
 						)
@@ -94,8 +98,12 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 					input::Event::Pointer(PointerEvent::ScrollWheel(s)) => {
 						Message::MouseAxisDiscrete(
 							[
-								s.scroll_value_v120(Axis::Horizontal) as f32 / 120.0,
-								s.scroll_value_v120(Axis::Vertical) as f32 / 120.0,
+								s.has_axis(Axis::Horizontal)
+									.then(|| s.scroll_value_v120(Axis::Horizontal) as f32 / 120.0)
+									.unwrap_or(0.0),
+								s.has_axis(Axis::Vertical)
+									.then(|| s.scroll_value_v120(Axis::Vertical) as f32 / 120.0)
+									.unwrap_or(0.0),
 							]
 							.into(),
 						)
