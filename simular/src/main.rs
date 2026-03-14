@@ -1,10 +1,10 @@
 use color_eyre::Result;
 use glam::Vec2;
 use ipc::receive_input_async_ipc;
+use mint::Vector2;
 use spatializer::spatial_input_beam;
 use stardust_xr_fusion::{
 	client::Client,
-	core::values::Vector2,
 	objects::{connect_client, hmd},
 	root::{RootAspect, RootEvent},
 	ClientHandle,

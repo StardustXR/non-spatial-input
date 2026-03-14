@@ -6,10 +6,6 @@ use serde::{Deserialize, Serialize};
 use spatializer::spatial_input_beam;
 use stardust_xr_fusion::{
 	client::{Client, ClientHandle},
-	core::{
-		schemas::zbus::Connection,
-		values::{color::rgba_linear, Datamap, Vector2},
-	},
 	drawable::{Lines, LinesAspect},
 	fields::{Field, FieldRefAspect, RayMarchResult},
 	input::{
@@ -19,6 +15,8 @@ use stardust_xr_fusion::{
 	objects::hmd,
 	root::{ClientState, RootAspect, RootEvent},
 	spatial::{SpatialAspect, SpatialRef, Transform},
+	values::{color::rgba_linear, Datamap, Vector2},
+	zbus::Connection,
 	AsyncEventHandle,
 };
 use stardust_xr_molecules::{
@@ -252,7 +250,10 @@ async fn handle_mouse_events(
 				}
 			}
 		}
-		let _ = pointer.set_datamap(&Datamap::from_typed(pointer_datamap.clone()).unwrap());
+		let _ = pointer.update_state(
+			InputDataType::Pointer(Pointer::default()),
+			&Datamap::from_typed(pointer_datamap.clone()).unwrap(),
+		);
 	}
 }
 
