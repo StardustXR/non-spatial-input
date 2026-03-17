@@ -36,7 +36,7 @@ pub async fn spatial_beam_target(
 				.await
 				.unwrap();
 			let Some(field_ref) = proxy.import(beam_origin.client()).await else {
-				eprintln!("field import was None");
+				// eprintln!("field import was None");
 				continue;
 			};
 			field_cache.insert(handler.clone(), field_ref.clone());
@@ -53,7 +53,7 @@ pub async fn spatial_beam_target(
 				{
 					Ok(r) => r,
 					Err(err) => {
-						eprintln!("error while raymarching: {err}");
+						// eprintln!("error while raymarching: {err}");
 						return None;
 					}
 				};
