@@ -12,8 +12,11 @@ homepage = "https://stardustxr.org"
 name = "manifold"
 path = "src/main.rs"
 
+[features]
+x11 = ["xkbcommon/x11", "dep:as-raw-xcb-connection"]
+
 [dependencies]
-xkbcommon = { version = "0.7.0", features = ["x11", "wayland"] }
+xkbcommon = { version = "0.7.0", features = ["wayland"] }
 softbuffer = "0.4.2"
 winit = "0.29.15"
 input-event-codes = "5.16.8"
@@ -22,7 +25,7 @@ ctrlc = "3.4.4"
 map-range = "0.1.2"
 glam = { version = "0.27.0", features = ["mint"] }
 ipc = { path = "../ipc" }
-as-raw-xcb-connection = "1.0.1"
+as-raw-xcb-connection = { version = "1.0.1", optional = true }
 wayland-client = "0.31.2"
 wayland-sys = "0.31.1"
 libc = "0.2.153"

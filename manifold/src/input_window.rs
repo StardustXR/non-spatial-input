@@ -1,4 +1,5 @@
 use crate::wayland::WlHandler;
+#[cfg(feature = "x11")]
 use as_raw_xcb_connection::{xcb_connection_t, ValidConnection};
 use glam::vec2;
 use ipc::{send_input_ipc, Message};
@@ -16,14 +17,17 @@ use winit::{
 	event_loop::{EventLoop, EventLoopWindowTarget},
 	keyboard::Key,
 	platform::scancode::PhysicalKeyExtScancode,
-	raw_window_handle::{WaylandDisplayHandle, XcbDisplayHandle},
+	raw_window_handle::WaylandDisplayHandle,
 	window::{CursorGrabMode, Window, WindowBuilder},
 };
+#[cfg(feature = "x11")]
+use winit::raw_window_handle::XcbDisplayHandle;
 use xkbcommon::xkb::{
 	ffi::XKB_KEYMAP_FORMAT_TEXT_V1,
-	x11::{get_core_keyboard_device_id, keymap_new_from_device},
 	Keymap, KEYMAP_COMPILE_NO_FLAGS, KEYMAP_FORMAT_TEXT_V1,
 };
+#[cfg(feature = "x11")]
+use xkbcommon::xkb::x11::{get_core_keyboard_device_id, keymap_new_from_device};
 
 pub struct InputWindow {
 	window: Rc<Window>,
@@ -67,6 +71,7 @@ impl InputWindow {
 				)
 				.unwrap()
 			},
+			#[cfg(feature = "x11")]
 			Ok(RawDisplayHandle::Xcb(XcbDisplayHandle {
 				connection: Some(conn),
 				..
