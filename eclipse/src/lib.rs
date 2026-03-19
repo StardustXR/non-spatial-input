@@ -1,17 +1,15 @@
-use input::event::keyboard::KeyboardEventTrait;
-use input::event::pointer::{Axis, PointerScrollEvent};
-use input::event::tablet_pad::{ButtonState, KeyState};
-use input::event::PointerEvent;
-use input::{Libinput, LibinputInterface};
+use colpetto::event::keyboard::KeyState;
+use colpetto::event::pointer::PointerEvent;
+use colpetto::event::{AsRawEvent, Event};
+use colpetto::{sys, Libinput};
 use ipc::{send_input_ipc, ButtonBlot, Message};
-use libc::{O_RDONLY, O_RDWR, O_WRONLY};
-use nix::poll::{poll, PollFd, PollFlags};
-use std::fs::{File, OpenOptions};
-use std::os::fd::AsRawFd;
-use std::os::unix::{fs::OpenOptionsExt, io::OwnedFd};
-use std::path::Path;
 use std::sync::mpsc::Receiver;
 use xkbcommon::xkb::{Context, Keymap, KEYMAP_FORMAT_TEXT_V1};
+
+const H_AXIS: sys::libinput_pointer_axis =
+	sys::libinput_pointer_axis::LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL;
+const V_AXIS: sys::libinput_pointer_axis =
+	sys::libinput_pointer_axis::LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL;
 
 pub enum StateChange {
 	Enable,
@@ -19,26 +17,54 @@ pub enum StateChange {
 	Stop,
 }
 
-struct Interface;
-impl LibinputInterface for Interface {
-	fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
-		#[allow(clippy::bad_bit_mask)]
-		OpenOptions::new()
-			.custom_flags(flags)
-			.read((flags & O_RDONLY != 0) | (flags & O_RDWR != 0))
-			.write((flags & O_WRONLY != 0) | (flags & O_RDWR != 0))
-			.open(path)
-			.map(|file| file.into())
-			.map_err(|err| err.raw_os_error().unwrap())
-	}
-	fn close_restricted(&mut self, fd: OwnedFd) {
-		drop(File::from(fd));
+/// Get the raw pointer event from a colpetto event.
+///
+/// # Safety
+/// The event must be a pointer event.
+unsafe fn raw_pointer(event: &impl AsRawEvent) -> *mut sys::libinput_event_pointer {
+	unsafe { sys::libinput_event_get_pointer_event(event.as_raw_event()) }
+}
+
+fn scroll_value(raw: *mut sys::libinput_event_pointer, axis: sys::libinput_pointer_axis) -> f32 {
+	if unsafe { sys::libinput_event_pointer_has_axis(raw, axis) } != 0 {
+		(unsafe { sys::libinput_event_pointer_get_scroll_value(raw, axis) }) as f32
+	} else {
+		0.0
 	}
 }
+
+fn scroll_value_v120(
+	raw: *mut sys::libinput_event_pointer,
+	axis: sys::libinput_pointer_axis,
+) -> f32 {
+	if unsafe { sys::libinput_event_pointer_has_axis(raw, axis) } != 0 {
+		(unsafe { sys::libinput_event_pointer_get_scroll_value_v120(raw, axis) }) as f32 / 120.0
+	} else {
+		0.0
+	}
+}
+
 pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
-	let mut input = Libinput::new_with_udev(Interface);
-	input.udev_assign_seat("seat0").unwrap();
-	let pollfd = PollFd::new(input.as_raw_fd(), PollFlags::POLLIN);
+	let mut libinput = Libinput::new(
+		|path, flags| {
+			let fd = unsafe { libc::open(path.as_ptr(), flags) };
+			if fd >= 0 {
+				Ok(fd)
+			} else {
+				Err(std::io::Error::last_os_error()
+					.raw_os_error()
+					.unwrap_or(libc::ENOENT))
+			}
+		},
+		|fd| unsafe {
+			libc::close(fd);
+		},
+	)
+	.expect("Failed to create libinput context");
+
+	libinput
+		.udev_assign_seat(c"seat0")
+		.expect("Failed to assign seat");
 
 	let keymap = Keymap::new_from_names(&Context::new(0), "evdev", "", "", "", None, 0)
 		.unwrap()
@@ -47,7 +73,14 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 
 	let mut mouse_blot = Some(ButtonBlot::default());
 	let mut key_blot = Some(ButtonBlot::default());
-	while poll(&mut [pollfd], -1).is_ok() {
+
+	let mut pollfd = libc::pollfd {
+		fd: libinput.get_fd(),
+		events: libc::POLLIN,
+		revents: 0,
+	};
+
+	while unsafe { libc::poll(&mut pollfd, 1, -1) } > 0 {
 		if let Ok(state_change) = state_rx.try_recv() {
 			match state_change {
 				StateChange::Enable => enabled = true,
@@ -55,61 +88,52 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 				StateChange::Stop => return,
 			}
 		}
-		input.dispatch().unwrap();
+		libinput.dispatch().unwrap();
 		if enabled {
-			for event in &mut input {
-				send_input_ipc(match event {
-					input::Event::Keyboard(input::event::KeyboardEvent::Key(k)) => {
-						key_blot
-							.as_mut()
-							.unwrap()
-							.key_update(k.key(), k.key_state() == KeyState::Pressed);
+			while let Some(event) = libinput.get_event() {
+				let message = match event {
+					Event::Keyboard(colpetto::event::keyboard::KeyboardEvent::Key(ref k)) => {
+						let pressed = k.key_state() == KeyState::Pressed;
+						key_blot.as_mut().unwrap().key_update(k.key(), pressed);
 						Message::Key {
 							keycode: k.key() + 8,
-							pressed: k.key_state() == KeyState::Pressed,
+							pressed,
 						}
 					}
-					input::Event::Pointer(PointerEvent::Button(p)) => {
-						mouse_blot
-							.as_mut()
-							.unwrap()
-							.key_update(p.button(), p.button_state() == ButtonState::Pressed);
-						Message::MouseButton {
-							button: p.button(),
-							pressed: p.button_state() == ButtonState::Pressed,
-						}
+					Event::Pointer(PointerEvent::Button(ref p)) => {
+						let raw = unsafe { raw_pointer(p) };
+						let button = unsafe { sys::libinput_event_pointer_get_button(raw) };
+						let state = unsafe { sys::libinput_event_pointer_get_button_state(raw) };
+						let pressed =
+							state == sys::libinput_button_state::LIBINPUT_BUTTON_STATE_PRESSED;
+						mouse_blot.as_mut().unwrap().key_update(button, pressed);
+						Message::MouseButton { button, pressed }
 					}
-					input::Event::Pointer(PointerEvent::Motion(m)) => {
-						Message::MouseMove([m.dx() as f32, m.dy() as f32].into())
+					Event::Pointer(PointerEvent::Motion(ref m)) => {
+						let raw = unsafe { raw_pointer(m) };
+						let dx = (unsafe { sys::libinput_event_pointer_get_dx(raw) }) as f32;
+						let dy = (unsafe { sys::libinput_event_pointer_get_dy(raw) }) as f32;
+						Message::MouseMove([dx, dy].into())
 					}
-					input::Event::Pointer(PointerEvent::ScrollContinuous(s)) => {
+					Event::Pointer(PointerEvent::ScrollContinuous(ref s)) => {
+						let raw = unsafe { raw_pointer(s) };
 						Message::MouseAxisContinuous(
-							[
-								s.has_axis(Axis::Horizontal)
-									.then(|| s.scroll_value(Axis::Horizontal) as f32)
-									.unwrap_or(0.0),
-								s.has_axis(Axis::Vertical)
-									.then(|| s.scroll_value(Axis::Vertical) as f32)
-									.unwrap_or(0.0),
-							]
-							.into(),
+							[scroll_value(raw, H_AXIS), scroll_value(raw, V_AXIS)].into(),
 						)
 					}
-					input::Event::Pointer(PointerEvent::ScrollWheel(s)) => {
+					Event::Pointer(PointerEvent::ScrollWheel(ref s)) => {
+						let raw = unsafe { raw_pointer(s) };
 						Message::MouseAxisDiscrete(
 							[
-								s.has_axis(Axis::Horizontal)
-									.then(|| s.scroll_value_v120(Axis::Horizontal) as f32 / 120.0)
-									.unwrap_or(0.0),
-								s.has_axis(Axis::Vertical)
-									.then(|| s.scroll_value_v120(Axis::Vertical) as f32 / 120.0)
-									.unwrap_or(0.0),
+								scroll_value_v120(raw, H_AXIS),
+								scroll_value_v120(raw, V_AXIS),
 							]
 							.into(),
 						)
 					}
 					_ => continue,
-				})
+				};
+				send_input_ipc(message);
 			}
 		}
 	}
