@@ -1,10 +1,10 @@
 use colpetto::event::keyboard::KeyState;
 use colpetto::event::pointer::PointerEvent;
 use colpetto::event::{AsRawEvent, Event};
-use colpetto::{sys, Libinput};
-use ipc::{send_input_ipc, ButtonBlot, Message};
+use colpetto::{Libinput, sys};
+use ipc::{ButtonBlot, Message, send_input_ipc};
 use std::sync::mpsc::Receiver;
-use xkbcommon::xkb::{Context, Keymap, KEYMAP_FORMAT_TEXT_V1};
+use xkbcommon::xkb::{self, Context, KEYMAP_FORMAT_TEXT_V1, KeyDirection, Keycode, Keymap, State};
 
 const H_AXIS: sys::libinput_pointer_axis =
 	sys::libinput_pointer_axis::LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL;
@@ -61,15 +61,14 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 		},
 	)
 	.expect("Failed to create libinput context");
-
 	libinput
 		.udev_assign_seat(c"seat0")
 		.expect("Failed to assign seat");
 
-	let keymap = Keymap::new_from_names(&Context::new(0), "evdev", "", "", "", None, 0)
-		.unwrap()
-		.get_as_string(KEYMAP_FORMAT_TEXT_V1);
-	send_input_ipc(Message::Keymap(keymap));
+	let keymap = Keymap::new_from_names(&Context::new(0), "evdev", "", "", "", None, 0).unwrap();
+	let mut xkb_state = State::new(&keymap);
+	let keymap_str = keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1);
+	send_input_ipc(Message::Keymap(keymap_str));
 
 	let mut mouse_blot = Some(ButtonBlot::default());
 	let mut key_blot = Some(ButtonBlot::default());
@@ -95,9 +94,22 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 					Event::Keyboard(colpetto::event::keyboard::KeyboardEvent::Key(ref k)) => {
 						let pressed = k.key_state() == KeyState::Pressed;
 						key_blot.as_mut().unwrap().key_update(k.key(), pressed);
+						xkb_state.update_key(
+							Keycode::new(k.key() + 8),
+							if pressed {
+								KeyDirection::Down
+							} else {
+								KeyDirection::Up
+							},
+						);
+
 						Message::Key {
-							keycode: k.key() + 8,
+							keycode: k.key(),
 							pressed,
+							mod_pressed: xkb_state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
+							mod_latched: xkb_state.serialize_mods(xkb::STATE_MODS_LATCHED),
+							mod_locked: xkb_state.serialize_mods(xkb::STATE_MODS_LOCKED),
+							layout_group: xkb_state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
 						}
 					}
 					Event::Pointer(PointerEvent::Button(ref p)) => {
@@ -113,12 +125,13 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 						let raw = unsafe { raw_pointer(m) };
 						let dx = (unsafe { sys::libinput_event_pointer_get_dx(raw) }) as f32;
 						let dy = (unsafe { sys::libinput_event_pointer_get_dy(raw) }) as f32;
-						Message::MouseMove([dx, dy].into())
+						Message::MouseMove([dx, -dy].into())
 					}
 					Event::Pointer(PointerEvent::ScrollContinuous(ref s)) => {
 						let raw = unsafe { raw_pointer(s) };
 						Message::MouseAxisContinuous(
-							[scroll_value(raw, H_AXIS), scroll_value(raw, V_AXIS)].into(),
+							[scroll_value(raw, H_AXIS), -scroll_value(raw, V_AXIS)].into(),
+							ipc::ScrollSource::Continuous,
 						)
 					}
 					Event::Pointer(PointerEvent::ScrollWheel(ref s)) => {
@@ -126,11 +139,20 @@ pub fn input_loop(mut enabled: bool, state_rx: Receiver<StateChange>) {
 						Message::MouseAxisDiscrete(
 							[
 								scroll_value_v120(raw, H_AXIS),
-								scroll_value_v120(raw, V_AXIS),
+								-scroll_value_v120(raw, V_AXIS),
 							]
 							.into(),
+							ipc::ScrollSource::Wheel,
 						)
 					}
+					Event::Pointer(PointerEvent::ScrollFinger(ref s)) => {
+						let raw = unsafe { raw_pointer(s) };
+						Message::MouseAxisContinuous(
+							[scroll_value(raw, H_AXIS), -scroll_value(raw, V_AXIS)].into(),
+							ipc::ScrollSource::Finger,
+						)
+					}
+
 					_ => continue,
 				};
 				send_input_ipc(message);

@@ -17,14 +17,36 @@ static MOUSE_BLOT: Mutex<Option<ButtonBlot>> = Mutex::new(None);
 static KEY_BLOT: Mutex<Option<ButtonBlot>> = Mutex::new(None);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t")]
+pub enum ScrollSource {
+	Wheel,
+	Finger,
+	Continuous,
+	WheelTilt,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", content = "c")]
 pub enum Message {
 	Keymap(String),
-	Key { keycode: u32, pressed: bool },
+	Key {
+		keycode: u32,
+		pressed: bool,
+
+		mod_pressed: u32,
+		mod_latched: u32,
+		mod_locked: u32,
+		layout_group: u32,
+	},
+	/// +Y == up, +X right
 	MouseMove(Vector2<f32>),
-	MouseButton { button: u32, pressed: bool },
-	MouseAxisContinuous(Vector2<f32>),
-	MouseAxisDiscrete(Vector2<f32>),
+	MouseButton {
+		button: u32,
+		pressed: bool,
+	},
+	/// +Y == up, +X right
+	MouseAxisContinuous(Vector2<f32>, ScrollSource),
+	/// +Y == up, +X right
+	MouseAxisDiscrete(Vector2<f32>, ScrollSource),
 	ResetInput,
 	Disconnect,
 }
@@ -32,12 +54,13 @@ impl Display for Message {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.write_str(&match self {
 			Message::Keymap(k) => format!("Updated keymap with length {}", k.len()),
-			Message::Key { keycode, pressed } => {
-				if *pressed {
+			Message::Key { keycode, pressed, mod_pressed, mod_latched, mod_locked, layout_group } => {
+				let key = if *pressed {
 					format!("Pressed key {keycode}")
 				} else {
 					format!("Released key {keycode}")
-				}
+				};
+                format!("{key}\nKeyboard Modifiers updated:\npressed: {mod_pressed:0b}\nlatched: {mod_latched:0b}\nlocked: {mod_locked:0b},\nlayout_group: {layout_group}")
 			}
 			Message::MouseMove(delta) => format!("Mouse moved with delta {:?}", *delta),
 			Message::MouseButton { button, pressed } => {
@@ -47,12 +70,10 @@ impl Display for Message {
 					format!("Released mouse {button}")
 				}
 			}
-			Message::MouseAxisContinuous(a) => format!("Mouse axis continuous {a:?}"),
-			Message::MouseAxisDiscrete(a) => format!("Mouse axis discrete {a:?}"),
+			Message::MouseAxisContinuous(a, source) => format!("Mouse axis continuous {a:?}, source: {source:?}"),
+			Message::MouseAxisDiscrete(a, source) => format!("Mouse axis discrete {a:?}, source: {source:?}"),
 			Message::ResetInput => "Reset input".to_string(),
-			Message::Disconnect => {
-				"Disconnect request".to_string()
-			}
+			Message::Disconnect => "Disconnect request".to_string(),
 		})
 	}
 }
@@ -65,7 +86,14 @@ pub fn send_input_ipc(message: Message) {
 			.unwrap()
 			.get_or_insert(ButtonBlot::default())
 			.key_update(*button, *pressed),
-		Message::Key { keycode, pressed } => KEY_BLOT
+		Message::Key {
+			keycode,
+			pressed,
+			mod_pressed,
+			mod_latched,
+			mod_locked,
+			layout_group,
+		} => KEY_BLOT
 			.lock()
 			.unwrap()
 			.get_or_insert(ButtonBlot::default())
@@ -80,7 +108,14 @@ pub fn send_input_ipc(message: Message) {
 			}
 			if let Some(blot) = KEY_BLOT.lock().unwrap().replace(ButtonBlot::default()) {
 				for (keycode, pressed) in blot.cleanup_presses_releases() {
-					messages.push(Message::Key { keycode, pressed });
+					messages.push(Message::Key {
+						keycode,
+						pressed,
+						mod_pressed: 0,
+						mod_latched: 0,
+						mod_locked: 0,
+						layout_group: 0,
+					});
 				}
 			}
 		}
@@ -118,14 +153,24 @@ fn test_loop() {
 	round_trip(Message::Key {
 		keycode: 124,
 		pressed: true,
+		mod_pressed: 0,
+		mod_latched: 0,
+		mod_locked: 0,
+		layout_group: 0,
 	});
 	round_trip(Message::MouseMove([243.5, 162.62].into()));
 	round_trip(Message::MouseButton {
 		button: 215,
 		pressed: true,
 	});
-	round_trip(Message::MouseAxisDiscrete([168.9, -21.7].into()));
-	round_trip(Message::MouseAxisContinuous([1723.2, -482.4].into()));
+	round_trip(Message::MouseAxisDiscrete(
+		[168.9, -21.7].into(),
+		ScrollSource::Finger,
+	));
+	round_trip(Message::MouseAxisContinuous(
+		[1723.2, -482.4].into(),
+		ScrollSource::Wheel,
+	));
 	round_trip(Message::ResetInput);
 }
 

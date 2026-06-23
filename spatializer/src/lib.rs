@@ -1,149 +1,121 @@
 #![allow(unused)]
 
-use rustc_hash::FxHashMap;
+use gluon::{Handler, Object, ObjectOrRef};
+use rustc_hash::{FxHashMap, FxHashSet};
 use stardust_xr_fusion::{
-	fields::{FieldRef, FieldRefAspect},
-	node::NodeType,
-	objects::{
-		interfaces::FieldRefProxy, object_registry::ObjectRegistry, FieldRefProxyExt, ObjectInfo,
-	},
-	spatial::{SpatialRef, SpatialRefAspect},
+	client::{Client, ClientHandler},
+	fields::FieldRef,
+	query::{InterfaceDependency, QueriedInterface, QueryableObjectRef},
+	spatial::{Spatial, SpatialRef},
+	spatial_query::{BeamQuery, BeamQueryHandler, BeamQueryHandlerHandler, SpatialQueryGuard},
 };
-use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
-use tracing::{debug_span, Instrument};
-use zbus::{proxy::Defaults, Connection, Proxy};
+use std::{
+	fmt::Debug,
+	future::ready,
+	hash::Hash,
+	sync::{Arc, OnceLock},
+};
+use tokio::sync::{Notify, RwLock, mpsc};
+use tracing::{Instrument, debug_span};
 
-type FieldCache = FxHashMap<ObjectInfo, FieldRef>;
-
-pub async fn spatial_beam_target(
-	conn: Connection,
-	object_registry: &ObjectRegistry,
-	interface_str: &'static str,
-	field_cache: &mut FieldCache,
-	beam_origin: &SpatialRef,
-) -> Option<ObjectInfo> {
-	let handlers = object_registry.get_objects(interface_str);
-
-	let mut join_set = tokio::task::JoinSet::new();
-	for handler in &handlers {
-		let handler = handler.clone();
-		let field_ref = if let Some(cached) = field_cache.get(&handler) {
-			cached.clone()
-		} else {
-			let proxy = handler
-				.to_typed_proxy::<FieldRefProxy>(&conn)
-				.await
-				.unwrap();
-			let Some(field_ref) = proxy.import(beam_origin.client()).await else {
-				// eprintln!("field import was None");
-				continue;
-			};
-			field_cache.insert(handler.clone(), field_ref.clone());
-			field_ref
-		};
-
-		join_set.spawn({
-			let beam_origin = beam_origin.clone();
-			async move {
-				let result = match field_ref
-					.ray_march(&beam_origin, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
-					.instrument(debug_span!("raymarching"))
-					.await
-				{
-					Ok(r) => r,
-					Err(err) => {
-						// eprintln!("error while raymarching: {err}");
-						return None;
-					}
-				};
-
-				if result.deepest_point_distance > 0.0 && result.min_distance < 0.05 {
-					Some((handler, result.deepest_point_distance))
-				} else {
-					None
-				}
-			}
-		});
-	}
-	field_cache.retain(|object, _| handlers.contains(object));
-
-	let mut closest_distance = f32::INFINITY;
-	let mut closest_handler = None;
-	while let Some(result) = join_set.join_next().await {
-		if let Ok(Some((handler, distance))) = result {
-			if distance < closest_distance {
-				closest_distance = distance;
-				closest_handler = Some(handler);
-			}
-		}
-	}
-
-	closest_handler
+#[derive(Debug, Handler)]
+pub struct SpatialInputBeam<Handler: Debug + Clone + Send + Sync + 'static> {
+	matching_handlers: RwLock<FxHashMap<QueryableObjectRef, Handler>>,
+	closest_handler: RwLock<Option<(QueryableObjectRef, f32)>>,
+	construct: fn(&str, ObjectOrRef) -> Option<Handler>,
+	guard: OnceLock<SpatialQueryGuard>,
 }
-
-#[allow(clippy::too_many_arguments)]
-pub async fn spatial_input_beam<P: From<Proxy<'static>> + Defaults + Clone + 'static, E, C>(
-	conn: Connection,
-	beam_origin: SpatialRef,
-	mut events: mpsc::UnboundedReceiver<E>,
-	handle_event: impl AsyncFn(&P, E, &mut Option<C>),
-	handle_cached_event: impl AsyncFn(&P, C),
-	reset: impl AsyncFn(&P),
-) {
-	let conn = &conn;
-	let object_registry = ObjectRegistry::new(conn).await;
-	let mut field_cache = FxHashMap::<ObjectInfo, FieldRef>::default();
-	let mut last_handler: Option<ObjectInfo> = None;
-	let mut buf = Vec::new();
-	let interface_str = P::INTERFACE.as_ref().unwrap().as_str();
-	loop {
-		buf.clear();
-		events.recv_many(&mut buf, 32).await;
-
-		let Some(closest_handler_object) = spatial_beam_target(
-			conn.clone(),
-			&object_registry,
-			interface_str,
-			&mut field_cache,
-			&beam_origin,
-		)
-		.await
-		else {
-			continue;
+impl<Handler: Debug + Clone + Send + Sync + 'static> SpatialInputBeam<Handler> {
+	pub async fn new(
+		client: &Client<impl ClientHandler>,
+		origin: SpatialRef,
+		construct: fn(&str, ObjectOrRef) -> Option<Handler>,
+		interface: String,
+		max_length: f32,
+	) -> stardust_xr_fusion::Result<Object<Self>> {
+		let handler = client.pion_device().register_object(Self {
+			matching_handlers: RwLock::default(),
+			closest_handler: RwLock::default(),
+			construct,
+			guard: OnceLock::new(),
+		});
+		let guard = client
+			.spatial_query_interface()
+			.beam_query(BeamQuery {
+				handler: BeamQueryHandler::from_handler(&handler),
+				interfaces: vec![InterfaceDependency {
+					id: interface,
+					optional: false,
+				}],
+				reference_spatial: origin,
+				origin: [0.0; 3].into(),
+				direction: [0.0, 0.0, -1.0].into(),
+				max_length,
+			})
+			.await?
+			.unwrap();
+		handler.guard.set(guard);
+		Ok(handler)
+	}
+	pub async fn get_handler(&self) -> Option<Handler> {
+		self.matching_handlers
+			.read()
+			.await
+			.get(&self.closest_handler.read().await.as_ref()?.0)
+			.cloned()
+	}
+}
+impl<Handler: Debug + Clone + Send + Sync + 'static> BeamQueryHandlerHandler
+	for SpatialInputBeam<Handler>
+{
+	async fn intersected(
+		&self,
+		_ctx: gluon::Context,
+		obj: QueryableObjectRef,
+		field: FieldRef,
+		spatial: SpatialRef,
+		mut interfaces: Vec<QueriedInterface>,
+		deepest_point_distance: f32,
+		distance: f32,
+	) {
+		let interface = interfaces.remove(0);
+		let Some(handler) = (self.construct)(&interface.interface_id, interface.interface) else {
+			return;
 		};
-		let closest_handler = closest_handler_object
-			.to_typed_proxy::<P>(conn)
-			.instrument(debug_span!("getting proxy"))
-			.await;
+		self.matching_handlers.write().await.insert(obj, handler);
+	}
 
-		if let Some(last) = last_handler.take() {
-			if last != closest_handler_object {
-				if let Ok(last) = last
-					.to_typed_proxy::<P>(conn)
-					.instrument(debug_span!("getting proxy"))
-					.await
-				{
-					reset(&last).await;
-				}
-			}
-		}
+	fn interfaces_changed(
+		&self,
+		_ctx: gluon::Context,
+		obj: QueryableObjectRef,
+		interfaces: Vec<QueriedInterface>,
+	) -> impl Future<Output = ()> + Send + Sync {
+		ready(())
+	}
 
-		let mut cached_state = None;
-		if let Ok(handler) = closest_handler {
-			for event in buf.drain(..) {
-				handle_event(&handler, event, &mut cached_state)
-					.instrument(debug_span!("calling handler fn"))
-					.await
-			}
-			if let Some(cached_state) = cached_state {
-				handle_cached_event(&handler, cached_state)
-					.instrument(debug_span!("calling cached handler"))
-					.await
-			}
-		} else {
-			while events.try_recv().is_ok() {}
+	async fn moved(
+		&self,
+		_ctx: gluon::Context,
+		obj: QueryableObjectRef,
+		deepest_point_distance: f32,
+		distance: f32,
+	) {
+		if self
+			.closest_handler
+			.read()
+			.await
+			.as_ref()
+			.is_none_or(|v| v.1 > distance)
+		{
+			self.closest_handler
+				.write()
+				.await
+				.replace((obj, deepest_point_distance));
 		}
-		last_handler.replace(closest_handler_object);
+	}
+
+	async fn left(&self, _ctx: gluon::Context, obj: QueryableObjectRef) {
+		self.matching_handlers.write().await.remove(&obj);
 	}
 }

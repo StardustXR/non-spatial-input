@@ -1,18 +1,20 @@
 use color_eyre::Result;
-use glam::Vec2;
 use ipc::receive_input_async_ipc;
-use mint::Vector2;
-use spatializer::spatial_input_beam;
+use spatializer::SpatialInputBeam;
 use stardust_xr_fusion::{
 	client::Client,
-	objects::{connect_client, hmd},
-	root::{RootAspect, RootEvent},
-	ClientHandle,
+	keymap::{KeymapStore, KeymapStoreExt},
+	tracked::{Tracked, TrackedExt},
 };
-use stardust_xr_molecules::keyboard::KeyboardHandlerProxy;
-use stardust_xr_molecules::mouse::MouseHandlerProxy;
+use stardust_xr_molecules::{
+	keyboard_handler::{
+		self,
+		protocol::{KeyEvent, KeyboardHandler},
+		ModifierState,
+	},
+	mouse_handler::{self, protocol::MouseHandler, ScrollSource},
+};
 use std::{io::IsTerminal, sync::Arc};
-use tokio::sync::{mpsc, Notify};
 use tracing::{debug_span, Instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter};
 
@@ -30,131 +32,56 @@ async fn main() -> Result<()> {
 			.with(tracing_subscriber::fmt::layer().compact()),
 	)
 	.unwrap();
-	let conn = connect_client().await.unwrap();
-	let client = Client::connect().await.expect("Couldn't connect");
-	let client_handle = client.handle();
-	let async_loop = client.async_event_loop();
-	let async_event_handle = async_loop.get_event_handle();
-	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
-	let (mouse_tx, mouse_rx) = mpsc::unbounded_channel::<MouseEvent>();
 
-	let event_handle = Arc::new(Notify::new());
-	let frame_loop = tokio::task::spawn({
-		let event_handle = event_handle.clone();
-		let client_handle = client_handle.clone();
-		async move {
-			loop {
-				async_event_handle.wait().await;
-				match client_handle.get_root().recv_root_event() {
-					Some(RootEvent::Frame { info: _ }) => {
-						event_handle.notify_waiters();
-					}
-					Some(RootEvent::Ping { response }) => {
-						response.send_ok(());
-					}
-					Some(RootEvent::SaveState { response: _ }) => {
-						// no state to save
-					}
-					None => {}
-				}
-			}
-		}
-	});
+	let (client, _) = Client::auto_connect(&[]).await.expect("Couldn't connect");
 
-	let hmd = hmd(&client_handle).await.unwrap();
+	let hmd = Tracked::hmd_spatial(&client).await.unwrap();
 
-	let keyboard_loop =
-		tokio::task::spawn(
-			spatial_input_beam::<KeyboardHandlerProxy, KeyboardEvent, ()>(
-				conn.clone(),
-				hmd.clone(),
-				keyboard_rx,
-				async |proxy, event, _| match event {
-					KeyboardEvent::KeyMap(keymap_id) => {
-						_ = proxy
-							.keymap(keymap_id)
-							.instrument(debug_span!("sending keymap"))
-							.await;
-					}
-					KeyboardEvent::Key { key, pressed, map } => {
-						_ = proxy
-							.keymap(map)
-							.instrument(debug_span!("sending keymap as part of button"))
-							.await;
-						_ = proxy
-							.key_state(key, pressed)
-							.instrument(debug_span!("sending keypress"))
-							.await;
-					}
-				},
-				async |_, _| {},
-				async |proxy| _ = proxy.reset().await,
-			),
-		);
-	let mouse_loop = tokio::task::spawn(spatial_input_beam::<MouseHandlerProxy, MouseEvent, Vec2>(
-		conn.clone(),
-		hmd,
-		mouse_rx,
-		async |proxy, event, move_state: &mut Option<Vec2>| match event {
-			MouseEvent::Move { delta } => {
-				*move_state.get_or_insert(Vec2::ZERO) += Vec2::from(delta);
-			}
-			MouseEvent::Button { button, pressed } => {
-				_ = proxy
-					.button(button, pressed)
-					.instrument(debug_span!("sending mouse button"))
-					.await;
-			}
-			MouseEvent::AxisContinuous { a } => {
-				_ = proxy
-					.scroll_continuous((a.x, -a.y))
-					.instrument(debug_span!("sending mouse scroll continuos"))
-					.await;
-			}
-			MouseEvent::AxisDiscrete { a } => {
-				_ = proxy
-					.scroll_discrete((a.x, -a.y))
-					.instrument(debug_span!("sending mouse scroll discrete"))
-					.await;
-			}
-		},
-		async |proxy, delta| {
-			_ = proxy
-				.motion((delta.x, -delta.y))
-				.instrument(debug_span!("sending mouse motion"))
-				.await;
-		},
-		async |proxy| _ = proxy.reset().await,
+	let keymap_store = KeymapStore::connect(&client).await.unwrap();
+
+	let keyboard_beam = SpatialInputBeam::new(
+		&client,
+		hmd.clone(),
+		|_, v| Some(KeyboardHandler::from_object_or_ref(v)),
+		keyboard_handler::protocol::EXTERNAL_PROTOCOL
+			.protocol_name
+			.to_string(),
+		f32::INFINITY,
+	)
+	.await
+	.unwrap();
+	let mouse_beam = SpatialInputBeam::new(
+		&client,
+		hmd.clone(),
+		|_, v| Some(MouseHandler::from_object_or_ref(v)),
+		mouse_handler::protocol::EXTERNAL_PROTOCOL
+			.protocol_name
+			.to_string(),
+		f32::INFINITY,
+	)
+	.await
+	.unwrap();
+
+	let input_loop = tokio::task::spawn(input_loop(
+		keymap_store,
+		keyboard_beam.handler_arc().clone(),
+		mouse_beam.handler_arc().clone(),
 	));
-	let input_loop = tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
 
 	tokio::select! {
 		biased;
 		e = tokio::signal::ctrl_c() => e?,
-		e = keyboard_loop => e?,
-		e = mouse_loop => e?,
 		e = input_loop => e?,
-		e = frame_loop => e?,
 	};
+	drop(keyboard_beam);
+	drop(mouse_beam);
 	Ok(())
 }
 
-enum KeyboardEvent {
-	Key { map: u64, key: u32, pressed: bool },
-	KeyMap(u64),
-}
-
-enum MouseEvent {
-	Move { delta: Vector2<f32> },
-	Button { button: u32, pressed: bool },
-	AxisContinuous { a: Vector2<f32> },
-	AxisDiscrete { a: Vector2<f32> },
-}
-
 async fn input_loop(
-	client: Arc<ClientHandle>,
-	key_changed_event: mpsc::UnboundedSender<KeyboardEvent>,
-	mouse_changed_event: mpsc::UnboundedSender<MouseEvent>,
+	keymap_store: KeymapStore,
+	keyboard_beam: Arc<SpatialInputBeam<KeyboardHandler>>,
+	mouse_beam: Arc<SpatialInputBeam<MouseHandler>>,
 ) {
 	let mut keymap = None;
 	while let Ok(message) = receive_input_async_ipc()
@@ -163,34 +90,92 @@ async fn input_loop(
 	{
 		match message {
 			ipc::Message::Keymap(map) => {
-				let Ok(new_keymap_id) = client.register_xkb_keymap(map).await else {
+				let Some(Ok(new_keymap_id)) = keymap_store
+					.exchange_string(&map)
+					.await
+					.map(|v| v.inspect_err(|err| tracing::error!("failed keymap exchange: {err}")))
+				else {
+					tracing::warn!("failed keymap exchanged");
 					continue;
 				};
-				_ = key_changed_event.send(KeyboardEvent::KeyMap(new_keymap_id));
 				keymap = Some(new_keymap_id);
 			}
-			ipc::Message::Key { keycode, pressed } => {
-				let Some(map) = keymap else {
+			ipc::Message::Key {
+				keycode,
+				pressed,
+				mod_pressed,
+				mod_latched,
+				mod_locked,
+				layout_group,
+			} => {
+				let Some(keymap) = keymap.clone() else {
+					tracing::warn!("no keymap");
 					continue;
 				};
-				_ = key_changed_event.send(KeyboardEvent::Key {
-					key: keycode,
-					pressed,
-					map,
-				});
+				let Some(handler) = keyboard_beam.get_handler().await else {
+					continue;
+				};
+				_ = handler.key(
+					KeyEvent {
+						keycode,
+						pressed,
+						modifiers: ModifierState {
+							depressed: mod_pressed,
+							latched: mod_latched,
+							locked: mod_locked,
+							layout_group,
+						},
+						keymap,
+					},
+					// TODO: forward timestamp?
+					None,
+				);
 			}
 			ipc::Message::MouseMove(delta) => {
-				let _span = debug_span!("send mouse motion").entered();
-				_ = mouse_changed_event.send(MouseEvent::Move { delta });
+				let Some(handler) = mouse_beam.get_handler().await else {
+					continue;
+				};
+				// TODO: forward timestamp?
+				_ = handler.motion(delta, None);
 			}
 			ipc::Message::MouseButton { button, pressed } => {
-				_ = mouse_changed_event.send(MouseEvent::Button { button, pressed });
+				let Some(handler) = mouse_beam.get_handler().await else {
+					continue;
+				};
+				// TODO: forward timestamp?
+				_ = handler.button(button, pressed, None);
 			}
-			ipc::Message::MouseAxisContinuous(scroll) => {
-				_ = mouse_changed_event.send(MouseEvent::AxisContinuous { a: scroll });
+			ipc::Message::MouseAxisContinuous(scroll, source) => {
+				let Some(handler) = mouse_beam.get_handler().await else {
+					continue;
+				};
+				// TODO: forward timestamp?
+				_ = handler.scroll_smooth(
+					scroll,
+					match source {
+						ipc::ScrollSource::Wheel => ScrollSource::Wheel,
+						ipc::ScrollSource::Finger => ScrollSource::Finger,
+						ipc::ScrollSource::Continuous => ScrollSource::Continuous,
+						ipc::ScrollSource::WheelTilt => ScrollSource::WheelTilt,
+					},
+					None,
+				);
 			}
-			ipc::Message::MouseAxisDiscrete(scroll) => {
-				_ = mouse_changed_event.send(MouseEvent::AxisDiscrete { a: scroll });
+			ipc::Message::MouseAxisDiscrete(scroll, source) => {
+				let Some(handler) = mouse_beam.get_handler().await else {
+					continue;
+				};
+				// TODO: forward timestamp?
+				_ = handler.scroll_discrete(
+					scroll,
+					match source {
+						ipc::ScrollSource::Wheel => ScrollSource::Wheel,
+						ipc::ScrollSource::Finger => ScrollSource::Finger,
+						ipc::ScrollSource::Continuous => ScrollSource::Continuous,
+						ipc::ScrollSource::WheelTilt => ScrollSource::WheelTilt,
+					},
+					None,
+				);
 			}
 			ipc::Message::ResetInput => (),
 			ipc::Message::Disconnect => break,

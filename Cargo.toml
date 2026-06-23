@@ -1,27 +1,31 @@
 [workspace]
 resolver = "2"
 members = [
-    "azimuth",
-    "display",
-    "eclipse",
-    "ipc",
-    "manifold",
-    "simular",
-    "spatializer",
+	#"azimuth",
+	"display",
+	"eclipse",
+	"ipc",
+	"manifold",
+	"simular",
+	"spatializer",
 ]
 
 [workspace.dependencies]
 serde = { version = "1.0.163", features = ["serde_derive"] }
 tokio = { version = "1.32.0", features = [
-    "rt-multi-thread",
-    "macros",
-    "time",
-    "sync",
+	"macros",
+	"rt-multi-thread",
+	"sync",
+	"time",
 ] }
 
+[workspace.dependencies.gluon]
+git = "https://github.com/Technobaboo/gluon"
+
 [workspace.dependencies.stardust-xr-fusion]
-features = ["keymap"]
 git = "https://github.com/StardustXR/core.git"
+branch = "binder"
 
 [workspace.dependencies.stardust-xr-molecules]
 git = "https://github.com/StardustXR/molecules.git"
+branch = "binder"

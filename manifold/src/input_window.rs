@@ -1,12 +1,14 @@
 use crate::wayland::WlHandler;
 #[cfg(feature = "x11")]
-use as_raw_xcb_connection::{xcb_connection_t, ValidConnection};
+use as_raw_xcb_connection::{ValidConnection, xcb_connection_t};
 use glam::vec2;
-use ipc::{send_input_ipc, Message};
+use ipc::{Message, send_input_ipc};
 use softbuffer::Surface;
 use std::process::exit;
 use std::{num::NonZeroU32, rc::Rc};
 use wayland_client::{backend::Backend, globals::registry_queue_init, protocol::wl_seat};
+#[cfg(feature = "x11")]
+use winit::raw_window_handle::XcbDisplayHandle;
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::{
 	dpi::{LogicalPosition, Size},
@@ -21,13 +23,11 @@ use winit::{
 	window::{CursorGrabMode, Window, WindowBuilder},
 };
 #[cfg(feature = "x11")]
-use winit::raw_window_handle::XcbDisplayHandle;
-use xkbcommon::xkb::{
-	ffi::XKB_KEYMAP_FORMAT_TEXT_V1,
-	Keymap, KEYMAP_COMPILE_NO_FLAGS, KEYMAP_FORMAT_TEXT_V1,
-};
-#[cfg(feature = "x11")]
 use xkbcommon::xkb::x11::{get_core_keyboard_device_id, keymap_new_from_device};
+use xkbcommon::xkb::{self, KeyDirection, Keycode};
+use xkbcommon::xkb::{
+	KEYMAP_COMPILE_NO_FLAGS, KEYMAP_FORMAT_TEXT_V1, Keymap, ffi::XKB_KEYMAP_FORMAT_TEXT_V1,
+};
 
 pub struct InputWindow {
 	window: Rc<Window>,
@@ -35,6 +35,7 @@ pub struct InputWindow {
 	mouse_delta: Option<LogicalPosition<f64>>,
 	grabbed: bool,
 	modifiers: Modifiers,
+	xkb_state: xkb::State,
 }
 impl InputWindow {
 	pub fn new(event_loop: &EventLoop<()>) -> Self {
@@ -48,7 +49,7 @@ impl InputWindow {
 				.unwrap(),
 		);
 
-		let xcb_context = xkbcommon::xkb::Context::new(0);
+		let xcb_context = xkb::Context::new(0);
 		let keymap = match window.display_handle().map(|handle| handle.as_raw()) {
 			Ok(RawDisplayHandle::Wayland(WaylandDisplayHandle { display, .. })) => unsafe {
 				let backend = Backend::from_foreign_display(
@@ -91,6 +92,7 @@ impl InputWindow {
 			keymap.get_as_string(XKB_KEYMAP_FORMAT_TEXT_V1),
 		));
 
+		let xkb_state = xkb::State::new(&keymap);
 		let context = softbuffer::Context::new(window.clone()).unwrap();
 		let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
 
@@ -100,6 +102,7 @@ impl InputWindow {
 			mouse_delta: None,
 			grabbed: true,
 			modifiers: Modifiers::default(),
+			xkb_state,
 		};
 
 		input_window.set_grab(false);
@@ -129,7 +132,7 @@ impl InputWindow {
 	fn handle_mouse_delta(&mut self, delta: (f64, f64)) {
 		if self.grabbed {
 			self.mouse_delta = Some(LogicalPosition::new(delta.0, delta.1));
-			send_input_ipc(Message::MouseMove([delta.0 as f32, delta.1 as f32].into()));
+			send_input_ipc(Message::MouseMove([delta.0 as f32, -delta.1 as f32].into()));
 		} else {
 			self.mouse_delta = None;
 		};
@@ -139,15 +142,21 @@ impl InputWindow {
 		match event {
 			WindowEvent::MouseInput { state, button, .. } => self.handle_mouse_input(state, button),
 			WindowEvent::MouseWheel { delta, .. } => match delta {
-				MouseScrollDelta::LineDelta(x, y) => {
-					send_input_ipc(Message::MouseAxisDiscrete(vec2(x, y).into()))
-				}
+				MouseScrollDelta::LineDelta(x, y) => send_input_ipc(Message::MouseAxisDiscrete(
+					// winit provides scroll in +Y == up for some reason
+					vec2(x, y).into(),
+					ipc::ScrollSource::Wheel,
+				)),
 				MouseScrollDelta::PixelDelta(p) => send_input_ipc(Message::MouseAxisContinuous(
+					// winit provides scroll in +Y == up for some reason
 					vec2(p.x as f32, p.y as f32).into(),
+					ipc::ScrollSource::Continuous,
 				)),
 			},
 			WindowEvent::KeyboardInput { event, .. } => self.handle_keyboard_input(event),
-			WindowEvent::ModifiersChanged(state) => self.modifiers = state,
+			WindowEvent::ModifiersChanged(state) => {
+				self.modifiers = state;
+			}
 			WindowEvent::CursorEntered { .. } => {
 				send_input_ipc(Message::ResetInput);
 			}
@@ -264,8 +273,22 @@ impl InputWindow {
 		let Some(keycode) = input.physical_key.to_scancode() else {
 			return;
 		};
-		let keycode = keycode + 8;
-		send_input_ipc(Message::Key { keycode, pressed });
+		self.xkb_state.update_key(
+			Keycode::new(keycode + 8),
+			if pressed {
+				KeyDirection::Down
+			} else {
+				KeyDirection::Up
+			},
+		);
+		send_input_ipc(Message::Key {
+			keycode,
+			pressed,
+			mod_pressed: self.xkb_state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
+			mod_latched: self.xkb_state.serialize_mods(xkb::STATE_MODS_LATCHED),
+			mod_locked: self.xkb_state.serialize_mods(xkb::STATE_MODS_LOCKED),
+			layout_group: self.xkb_state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
+		});
 	}
 
 	const GRABBED_WINDOW_TITLE: &'static str = "Manifold Input (super+q to release cursor)";
