@@ -117,5 +117,14 @@ impl<Handler: Debug + Clone + Send + Sync + 'static> BeamQueryHandlerHandler
 
 	async fn left(&self, _ctx: gluon::Context, obj: QueryableObjectRef) {
 		self.matching_handlers.write().await.remove(&obj);
+		if self
+			.closest_handler
+			.read()
+			.await
+			.as_ref()
+			.is_some_and(|v| v.0 == obj)
+		{
+			self.closest_handler.write().await.take();
+		}
 	}
 }
