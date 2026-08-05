@@ -4,7 +4,7 @@ use gluon::{Handler, Object, ObjectOrRef};
 use rustc_hash::{FxHashMap, FxHashSet};
 use stardust_xr_fusion::{
 	client::{Client, ClientHandler},
-	fields::FieldRef,
+	fields::{FieldRef, FieldSample, RayMarchResult},
 	query::{InterfaceDependency, QueriedInterface, QueryableObjectRef},
 	spatial::{Spatial, SpatialRef},
 	spatial_query::{BeamQuery, BeamQueryHandler, BeamQueryHandlerHandler, SpatialQueryGuard},
@@ -75,14 +75,28 @@ impl<Handler: Debug + Clone + Send + Sync + 'static> BeamQueryHandlerHandler
 		field: FieldRef,
 		spatial: SpatialRef,
 		mut interfaces: Vec<QueriedInterface>,
-		deepest_point_distance: f32,
-		distance: f32,
+		sample: RayMarchResult,
 	) {
 		let interface = interfaces.remove(0);
 		let Some(handler) = (self.construct)(&interface.interface_id, interface.interface) else {
 			return;
 		};
-		self.matching_handlers.write().await.insert(obj, handler);
+		self.matching_handlers
+			.write()
+			.await
+			.insert(obj.clone(), handler);
+		if self
+			.closest_handler
+			.read()
+			.await
+			.as_ref()
+			.is_none_or(|v| v.1 > sample.min_distance)
+		{
+			self.closest_handler
+				.write()
+				.await
+				.replace((obj, sample.deepest_point_distance));
+		}
 	}
 
 	fn interfaces_changed(
@@ -94,24 +108,18 @@ impl<Handler: Debug + Clone + Send + Sync + 'static> BeamQueryHandlerHandler
 		ready(())
 	}
 
-	async fn moved(
-		&self,
-		_ctx: gluon::Context,
-		obj: QueryableObjectRef,
-		deepest_point_distance: f32,
-		distance: f32,
-	) {
+	async fn moved(&self, _ctx: gluon::Context, obj: QueryableObjectRef, sample: RayMarchResult) {
 		if self
 			.closest_handler
 			.read()
 			.await
 			.as_ref()
-			.is_none_or(|v| v.1 > distance)
+			.is_none_or(|v| v.1 > sample.min_distance)
 		{
 			self.closest_handler
 				.write()
 				.await
-				.replace((obj, deepest_point_distance));
+				.replace((obj, sample.deepest_point_distance));
 		}
 	}
 
