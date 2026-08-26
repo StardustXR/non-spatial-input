@@ -1,13 +1,13 @@
 #![allow(unused)]
 
-use gluon::{Handler, Object, ObjectOrRef};
+use gluon::{Handler, Node, Ref, RefExt};
 use rustc_hash::{FxHashMap, FxHashSet};
 use stardust_xr_fusion::{
 	client::{Client, ClientHandler},
 	fields::{FieldRef, FieldSample, RayMarchResult},
-	query::{InterfaceDependency, QueriedInterface, QueryableObjectRef},
+	query::{InterfaceDependency, QueriedInterface, QueryableId},
 	spatial::{Spatial, SpatialRef},
-	spatial_query::{BeamQuery, BeamQueryHandler, BeamQueryHandlerHandler, SpatialQueryGuard},
+	spatial_query::{BeamQuery, BeamQueryHandle, BeamQueryHandler, BeamQueryHandlerHandler},
 };
 use std::{
 	fmt::Debug,
@@ -20,29 +20,30 @@ use tracing::{Instrument, debug_span};
 
 #[derive(Debug, Handler)]
 pub struct SpatialInputBeam<Handler: Debug + Clone + Send + Sync + 'static> {
-	matching_handlers: RwLock<FxHashMap<QueryableObjectRef, Handler>>,
-	closest_handler: RwLock<Option<(QueryableObjectRef, f32)>>,
-	construct: fn(&str, ObjectOrRef) -> Option<Handler>,
-	guard: OnceLock<SpatialQueryGuard>,
+	matching_handlers: RwLock<FxHashMap<QueryableId, Handler>>,
+	closest_handler: RwLock<Option<(QueryableId, f32)>>,
+	construct: fn(&str, Ref) -> Option<Handler>,
+	guard: OnceLock<BeamQueryHandle>,
 }
 impl<Handler: Debug + Clone + Send + Sync + 'static> SpatialInputBeam<Handler> {
 	pub async fn new(
 		client: &Client<impl ClientHandler>,
 		origin: SpatialRef,
-		construct: fn(&str, ObjectOrRef) -> Option<Handler>,
+		construct: fn(&str, Ref) -> Option<Handler>,
 		interface: String,
 		max_length: f32,
-	) -> stardust_xr_fusion::Result<Object<Self>> {
-		let handler = client.pion_device().register_object(Self {
+	) -> stardust_xr_fusion::Result<Node<Self>> {
+		let (node, handler) = BeamQueryHandler::new_node(Self {
 			matching_handlers: RwLock::default(),
 			closest_handler: RwLock::default(),
 			construct,
 			guard: OnceLock::new(),
-		});
+		})?;
+		let handler = handler.into_proxy();
 		let guard = client
 			.spatial_query_interface()
 			.beam_query(BeamQuery {
-				handler: BeamQueryHandler::from_handler(&handler),
+				handler,
 				interfaces: vec![InterfaceDependency {
 					id: interface,
 					optional: false,
@@ -54,8 +55,8 @@ impl<Handler: Debug + Clone + Send + Sync + 'static> SpatialInputBeam<Handler> {
 			})
 			.await?
 			.unwrap();
-		handler.guard.set(guard);
-		Ok(handler)
+		node.guard.set(guard);
+		Ok(node)
 	}
 	pub async fn get_handler(&self) -> Option<Handler> {
 		self.matching_handlers
@@ -71,7 +72,7 @@ impl<Handler: Debug + Clone + Send + Sync + 'static> BeamQueryHandlerHandler
 	async fn intersected(
 		&self,
 		_ctx: gluon::Context,
-		obj: QueryableObjectRef,
+		obj: QueryableId,
 		field: FieldRef,
 		spatial: SpatialRef,
 		mut interfaces: Vec<QueriedInterface>,
@@ -84,7 +85,7 @@ impl<Handler: Debug + Clone + Send + Sync + 'static> BeamQueryHandlerHandler
 		self.matching_handlers
 			.write()
 			.await
-			.insert(obj.clone(), handler);
+			.insert(obj, handler);
 		if self
 			.closest_handler
 			.read()
@@ -102,13 +103,13 @@ impl<Handler: Debug + Clone + Send + Sync + 'static> BeamQueryHandlerHandler
 	fn interfaces_changed(
 		&self,
 		_ctx: gluon::Context,
-		obj: QueryableObjectRef,
+		obj: QueryableId,
 		interfaces: Vec<QueriedInterface>,
 	) -> impl Future<Output = ()> + Send + Sync {
 		ready(())
 	}
 
-	async fn moved(&self, _ctx: gluon::Context, obj: QueryableObjectRef, sample: RayMarchResult) {
+	async fn moved(&self, _ctx: gluon::Context, obj: QueryableId, sample: RayMarchResult) {
 		if self
 			.closest_handler
 			.read()
@@ -123,7 +124,7 @@ impl<Handler: Debug + Clone + Send + Sync + 'static> BeamQueryHandlerHandler
 		}
 	}
 
-	async fn left(&self, _ctx: gluon::Context, obj: QueryableObjectRef) {
+	async fn left(&self, _ctx: gluon::Context, obj: QueryableId) {
 		self.matching_handlers.write().await.remove(&obj);
 		if self
 			.closest_handler

@@ -1,4 +1,5 @@
 use color_eyre::Result;
+use gluon::Interface as _;
 use ipc::receive_input_async_ipc;
 use spatializer::SpatialInputBeam;
 use stardust_xr_fusion::{
@@ -8,11 +9,10 @@ use stardust_xr_fusion::{
 };
 use stardust_xr_molecules::{
 	keyboard_handler::{
-		self,
 		protocol::{KeyEvent, KeyboardHandler},
 		ModifierState,
 	},
-	mouse_handler::{self, protocol::MouseHandler, ScrollSource},
+	mouse_handler::{protocol::MouseHandler, ScrollSource},
 };
 use std::{io::IsTerminal, sync::Arc};
 use tracing::{debug_span, Instrument};
@@ -33,19 +33,17 @@ async fn main() -> Result<()> {
 	)
 	.unwrap();
 
-	let (client, _) = Client::auto_connect(&[]).await.expect("Couldn't connect");
+	let (client, _) = Client::connect(&[]).await.expect("Couldn't connect");
 
-	let hmd = Tracked::hmd_spatial(&client).await.unwrap();
+	let hmd = Tracked::hmd_spatial().await.unwrap();
 
-	let keymap_store = KeymapStore::connect(&client).await.unwrap();
+	let keymap_store = KeymapStore::connect().await.unwrap();
 
 	let keyboard_beam = SpatialInputBeam::new(
 		&client,
 		hmd.clone(),
-		|_, v| Some(KeyboardHandler::from_object_or_ref(v)),
-		keyboard_handler::protocol::EXTERNAL_PROTOCOL
-			.protocol_name
-			.to_string(),
+		|_, v| Some(KeyboardHandler::from_ref(v)),
+		KeyboardHandler::ID.into(),
 		f32::INFINITY,
 	)
 	.await
@@ -53,10 +51,8 @@ async fn main() -> Result<()> {
 	let mouse_beam = SpatialInputBeam::new(
 		&client,
 		hmd.clone(),
-		|_, v| Some(MouseHandler::from_object_or_ref(v)),
-		mouse_handler::protocol::EXTERNAL_PROTOCOL
-			.protocol_name
-			.to_string(),
+		|_, v| Some(MouseHandler::from_ref(v)),
+		MouseHandler::ID.into(),
 		f32::INFINITY,
 	)
 	.await
@@ -64,8 +60,8 @@ async fn main() -> Result<()> {
 
 	let input_loop = tokio::task::spawn(input_loop(
 		keymap_store,
-		keyboard_beam.handler_arc().clone(),
-		mouse_beam.handler_arc().clone(),
+		keyboard_beam.handler().clone(),
+		mouse_beam.handler().clone(),
 	));
 
 	tokio::select! {
