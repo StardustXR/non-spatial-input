@@ -1,5 +1,5 @@
 use color_eyre::Result;
-use gluon::Interface as _;
+use gluon::{Interface, Liveness};
 use ipc::receive_input_async_ipc;
 use spatializer::SpatialInputBeam;
 use stardust_xr_fusion::{
@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
 
 	tokio::select! {
 		biased;
+		_ = client.server().death_notification() => (),
 		e = tokio::signal::ctrl_c() => e?,
 		e = input_loop => e?,
 	};
