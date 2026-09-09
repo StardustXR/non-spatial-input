@@ -1,408 +1,318 @@
-use glam::{Quat, Vec3};
+#![allow(clippy::mutable_key_type)]
+
+use glam::Quat;
+use gluon::{Interface, Liveness};
 use input_event_codes::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use ipc::receive_input_async_ipc;
-use rustc_hash::{FxHashMap, FxHashSet};
-use serde::{Deserialize, Serialize};
-use spatializer::spatial_input_beam;
+use parking_lot::Mutex;
 use stardust_xr_fusion::{
-	client::{Client, ClientHandle},
-	drawable::{Lines, LinesAspect},
-	fields::{Field, FieldRefAspect, RayMarchResult},
-	input::{
-		InputDataType, InputHandler, InputMethod, InputMethodAspect, InputMethodEvent, Pointer,
-	},
-	node::NodeType,
-	objects::hmd,
-	root::{ClientState, RootAspect, RootEvent},
-	spatial::{SpatialAspect, SpatialRef, Transform},
-	values::{color::rgba_linear, Datamap, Vector2},
-	zbus::Connection,
-	AsyncEventHandle,
+	client::{Client, FrameInfo},
+	drawable::{Line, Lines, LinesExt},
+	fields::RayMarchResult,
+	keymap::{KeymapStore, KeymapStoreExt},
+	query::QueryableId,
+	spatial::{PartialTransform, Spatial, SpatialExt, SpatialRef, Transform},
+	suis::{DatamapData, InputDataType, InputHandler, Pointer},
+	tracked::{Tracked, TrackedExt},
+	types::{rgba_linear, Color, Posef, Timestamp, Vec2F},
 };
 use stardust_xr_molecules::{
-	keyboard::KeyboardHandlerProxy,
+	input_method::{CachedHandler, DatamapBuilder, InputMethod, InputMethodHelper},
+	keyboard_handler::{
+		protocol::{KeyEvent, KeyboardHandler},
+		ModifierState,
+	},
 	lines::{circle, LineExt},
+	spatial_input_beam::SpatialInputBeam,
 };
-use std::{f32::consts::FRAC_PI_2, io::IsTerminal, slice, sync::Arc};
-use tokio::{
-	sync::{mpsc, watch, Notify},
-	task::JoinSet,
+use std::{
+	collections::{HashMap, HashSet},
+	f32::consts::FRAC_PI_2,
+	io::IsTerminal,
+	sync::Arc,
 };
-use tracing::{debug_span, info, Instrument};
+use tokio::sync::broadcast::{self, error::RecvError};
+use tracing::{debug_span, warn, Instrument};
+use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter};
 
 const MOUSE_SENSITIVITY: f32 = 0.1;
+const RETICLE_REST: f32 = 0.5;
+const IDLE: Color = rgba_linear!(1.0, 1.0, 1.0, 1.0);
+const CAPTURED: Color = rgba_linear!(0.0, 1.0, 0.0, 1.0);
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PointerDatamap {
-	mouse: (),
+fn reticle(color: Color) -> Vec<Line> {
+	vec![circle(8, 0.0, 0.001).thickness(0.0025).color(color)]
+}
+
+#[derive(Default)]
+struct MouseState {
+	yaw: f32,
+	pitch: f32,
+
 	select: f32,
 	middle: f32,
 	context: f32,
 	grab: f32,
-	scroll_continuous: Vector2<f32>,
-	scroll_discrete: Vector2<f32>,
-	raw_input_events: FxHashSet<u32>,
+
+	scroll_continuous: [f32; 2],
+	scroll_discrete: [f32; 2],
 }
-impl Default for PointerDatamap {
-	fn default() -> Self {
-		Self {
-			mouse: (),
-			select: 0.0,
-			middle: 0.0,
-			context: 0.0,
-			grab: 0.0,
-			scroll_continuous: [0.0; 2].into(),
-			scroll_discrete: [0.0; 2].into(),
-			raw_input_events: FxHashSet::default(),
+
+struct MousePointer {
+	spatial: Spatial,
+	state: Mutex<MouseState>,
+}
+impl MousePointer {
+	fn look(&self, delta: Vec2F) {
+		let mut state = self.state.lock();
+		state.yaw += delta.x * MOUSE_SENSITIVITY;
+		state.pitch = (state.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-90.0, 90.0);
+		let rotation = Quat::from_rotation_y(-state.yaw.to_radians())
+			* Quat::from_rotation_x(-state.pitch.to_radians());
+		drop(state);
+
+		let _ = self
+			.spatial
+			.set_local_transform(PartialTransform::from_rotation(rotation));
+	}
+
+	fn button(&self, button: u32, pressed: bool) {
+		let pressed = pressed as u32 as f32;
+		let mut state = self.state.lock();
+		match button {
+			BTN_LEFT!() => state.select = pressed,
+			BTN_MIDDLE!() => state.middle = pressed,
+			BTN_RIGHT!() => {
+				state.context = pressed;
+				state.grab = pressed;
+			}
+			_ => {}
 		}
+	}
+
+	fn scroll(&self, continuous: Option<Vec2F>, discrete: Option<Vec2F>) {
+		let mut state = self.state.lock();
+		if let Some(a) = continuous {
+			state.scroll_continuous[0] += a.x;
+			state.scroll_continuous[1] += a.y;
+		}
+		if let Some(a) = discrete {
+			state.scroll_discrete[0] += a.x;
+			state.scroll_discrete[1] += a.y;
+		}
+	}
+
+	/// scroll is a delta, so it only counts for the frame it arrived in
+	fn end_frame(&self) {
+		let mut state = self.state.lock();
+		state.scroll_continuous = [0.0; 2];
+		state.scroll_discrete = [0.0; 2];
+	}
+}
+impl InputMethodHelper for MousePointer {
+	type QueryValue = RayMarchResult;
+
+	async fn order_handlers_and_captures(
+		&self,
+		handlers: &HashMap<QueryableId, CachedHandler<RayMarchResult>>,
+		capture_requests: &HashSet<InputHandler>,
+	) -> (Vec<InputHandler>, Option<InputHandler>) {
+		// a capture requester is picked out of every handler the query knows, not just the ones
+		// the beam is currently on, so looking away from what you grabbed doesn't drop it
+		let capture = closest(
+			handlers
+				.values()
+				.filter(|e| e.spatial.is_some() && capture_requests.contains(&e.handler)),
+		);
+		if let Some(handler) = capture {
+			return (vec![handler.clone()], Some(handler));
+		}
+		(hits(handlers).into_iter().map(|(_, h)| h).collect(), None)
+	}
+
+	async fn input_data(&self, _time: Timestamp) -> Option<InputDataType> {
+		Some(InputDataType::Pointer {
+			data: Pointer {
+				pose: Posef::default(),
+				deepest_point: 0.0,
+			},
+		})
+	}
+
+	async fn datamap(&self) -> HashMap<String, DatamapData> {
+		let state = self.state.lock();
+		DatamapBuilder::default()
+			.bool("mouse", true)
+			.f32("select", state.select)
+			.f32("middle", state.middle)
+			.f32("context", state.context)
+			.f32("grab", state.grab)
+			.vec2("scroll_continuous", state.scroll_continuous)
+			.vec2("scroll_discrete", state.scroll_discrete)
+			.build()
 	}
 }
 
-enum MouseEvent {
-	Move { delta: Vector2<f32> },
-	Button { button: u32, pressed: bool },
-	AxisContinuous { a: Vector2<f32> },
-	AxisDiscrete { a: Vector2<f32> },
+/// handlers the beam is actually inside, nearest first
+fn hits(
+	handlers: &HashMap<QueryableId, CachedHandler<RayMarchResult>>,
+) -> Vec<(f32, InputHandler)> {
+	let mut hits: Vec<(f32, InputHandler)> = handlers
+		.values()
+		.filter(|e| e.spatial.is_some())
+		// a positive min_distance is a near miss, and anything at the origin is the client's own
+		.filter(|e| e.value.min_distance <= 0.0 && e.value.deepest_point_distance >= 0.01)
+		.map(|e| (e.value.deepest_point_distance, e.handler.clone()))
+		.collect();
+	hits.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+	hits
 }
 
-enum KeyboardEvent {
-	Key { map: u64, key: u32, pressed: bool },
-	KeyMap(u64),
+fn closest<'a>(
+	handlers: impl Iterator<Item = &'a CachedHandler<RayMarchResult>>,
+) -> Option<InputHandler> {
+	handlers
+		.min_by(|a, b| {
+			a.value
+				.deepest_point_distance
+				.total_cmp(&b.value.deepest_point_distance)
+		})
+		.map(|e| e.handler.clone())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
 	if std::io::stdin().is_terminal() {
 		panic!("You need to pipe manifold or eclipse's output into this e.g. `eclipse | azimuth`");
 	}
-
-	// Client setup
-	let client = Client::connect().await.expect("Couldn't connect");
-	let client_handle = client.handle();
-	let async_loop = client.async_event_loop();
-	let hmd = hmd(&client_handle).await.unwrap();
-
-	let dbus_connection = Connection::session().await.unwrap();
-
-	// Setup the visual pointer and reticle
-	let pointer = InputMethod::create(
-		client_handle.get_root(),
-		Transform::identity(),
-		InputDataType::Pointer(Pointer {
-			origin: [0.0; 3].into(),
-			orientation: Quat::IDENTITY.into(),
-			deepest_point: [0.0; 3].into(),
-		}),
-		&Datamap::from_typed(PointerDatamap::default()).unwrap(),
-	)
-	.unwrap();
-	let _ = pointer.set_relative_transform(&hmd, Transform::from_translation([0.0; 3]));
-
-	// Create the visual reticle
-	let line = circle(8, 0.0, 0.001)
-		.thickness(0.0025)
-		.color(rgba_linear!(1.0, 1.0, 1.0, 1.0));
-	let pointer_reticle = Lines::create(
-		&pointer,
-		Transform::from_translation_rotation([0.0, 0.0, -0.5], Quat::from_rotation_x(FRAC_PI_2)),
-		&[line],
+	tracing::subscriber::set_global_default(
+		tracing_subscriber::registry()
+			.with(EnvFilter::from_default_env())
+			.with(tracing_subscriber::fmt::layer().compact()),
 	)
 	.unwrap();
 
-	// Event handling setup
-	let frame_event = Arc::new(Notify::new());
-	let (keyboard_tx, keyboard_rx) = mpsc::unbounded_channel::<KeyboardEvent>();
-	let (mouse_tx, mouse_rx) = mpsc::unbounded_channel::<MouseEvent>();
-	let (frame_count_tx, frame_count_rx) = watch::channel(0);
+	let (client, _root) = Client::connect(&[]).await.expect("Couldn't connect");
+	let hmd = Tracked::hmd_spatial().await.unwrap();
 
-	// Spawn the main task loops
-	let frame_loop = tokio::task::spawn(handle_frame_events(
-		frame_event.clone(),
-		client_handle.clone(),
-		async_loop.get_event_handle(),
-		pointer.clone(),
-		hmd.clone(),
-		frame_count_tx.clone(),
-	));
-
-	tokio::task::spawn(handle_mouse_events(
-		pointer.clone(),
-		mouse_rx,
-		frame_event.clone(),
-		frame_count_rx.clone(),
-	));
-
-	let (state_tx, state_rx) = watch::channel(MouseTargetState::default());
-
-	tokio::task::spawn(input_method_events(
-		frame_event.clone(),
-		pointer.clone(),
-		state_tx,
-	));
-
-	tokio::task::spawn(input_method_loop(
-		frame_event.clone(),
-		state_rx,
-		pointer.clone(),
-		pointer_reticle,
-	));
-
-	tokio::task::spawn(
-		spatial_input_beam::<KeyboardHandlerProxy, KeyboardEvent, ()>(
-			dbus_connection,
-			pointer.clone().as_spatial().as_spatial_ref(),
-			keyboard_rx,
-			async |proxy, event, _| match event {
-				KeyboardEvent::KeyMap(keymap_id) => {
-					_ = proxy
-						.keymap(keymap_id)
-						.instrument(debug_span!("sending keymap"))
-						.await;
-				}
-				KeyboardEvent::Key { key, pressed, map } => {
-					_ = proxy
-						.keymap(map)
-						.instrument(debug_span!("sending keymap as part of button"))
-						.await;
-					_ = proxy
-						.key_state(key, pressed)
-						.instrument(debug_span!("sending keypress"))
-						.await;
-				}
-			},
-			async |_, _| {},
-			async |proxy| _ = proxy.reset().await,
+	// parented to the root, not the hmd, so only the mouse ever rotates it, the frame loop
+	// pins its position to the hmd
+	let (pointer_spatial, pointer_ref) = Spatial::new(&client, client.root(), Transform::IDENTITY)
+		.await
+		.unwrap();
+	// circle() is on the XZ plane, stand it up so it faces down the beam
+	let (reticle_spatial, _) = Spatial::new(
+		&client,
+		&pointer_ref,
+		Transform::from_translation_rotation(
+			[0.0, 0.0, -RETICLE_REST],
+			Quat::from_rotation_x(FRAC_PI_2),
 		),
-	);
+	)
+	.await
+	.unwrap();
+	let reticle_lines = Lines::new(&client, &reticle_spatial, reticle(IDLE))
+		.await
+		.unwrap();
 
-	tokio::task::spawn(input_loop(client_handle.clone(), keyboard_tx, mouse_tx));
+	let (method, _proxy, _query) = InputMethod::new_beam(
+		&client,
+		MousePointer {
+			spatial: pointer_spatial,
+			state: Mutex::default(),
+		},
+		pointer_ref.clone(),
+		[0.0; 3].into(),
+		[0.0, 0.0, -1.0].into(),
+		f32::INFINITY,
+	)
+	.await
+	.unwrap();
+
+	let keyboard_beam = SpatialInputBeam::new(
+		&client,
+		pointer_ref,
+		|_, v| Some(KeyboardHandler::from_ref(v)),
+		KeyboardHandler::ID.into(),
+		f32::INFINITY,
+	)
+	.await
+	.unwrap();
+
+	let keymap_store = KeymapStore::connect().await.unwrap();
+	let input_loop = tokio::task::spawn(input_loop(
+		keymap_store,
+		method.handler().clone(),
+		keyboard_beam.handler().clone(),
+	));
+	let frame_loop = tokio::task::spawn(frame_loop(
+		client.frame_receiver(),
+		method.handler().clone(),
+		hmd,
+		reticle_spatial,
+		reticle_lines,
+	));
 
 	tokio::select! {
 		biased;
+		_ = client.server().death_notification() => (),
 		_ = tokio::signal::ctrl_c() => (),
+		_ = input_loop => (),
 		_ = frame_loop => (),
 	}
+	drop(method);
+	drop(keyboard_beam);
 }
 
-async fn handle_mouse_events(
-	pointer: InputMethod,
-	mut mouse_rx: mpsc::UnboundedReceiver<MouseEvent>,
-	event_handle: Arc<Notify>,
-	frame_count_rx: watch::Receiver<u32>,
+async fn frame_loop(
+	mut frames: broadcast::Receiver<FrameInfo>,
+	method: Arc<InputMethod<MousePointer>>,
+	hmd: SpatialRef,
+	reticle_spatial: Spatial,
+	reticle_lines: Lines,
 ) {
-	let mut yaw = 0.0;
-	let mut pitch = 0.0;
-	let mut pointer_datamap = PointerDatamap::default();
-	let mut old_frame_count = 0_u32;
-	let mut mouse_buttons = FxHashSet::default();
-
+	let mut captured = false;
+	let mut distance = RETICLE_REST;
 	loop {
-		event_handle.notified().await;
-
-		if *frame_count_rx.borrow() > old_frame_count {
-			old_frame_count = *frame_count_rx.borrow();
-			pointer_datamap.scroll_continuous = [0.0; 2].into();
-			pointer_datamap.scroll_discrete = [0.0; 2].into();
-		}
-
-		while let Ok(event) = mouse_rx.try_recv() {
-			match event {
-				MouseEvent::Move { delta } => {
-					yaw += delta.x * MOUSE_SENSITIVITY;
-					pitch += delta.y * MOUSE_SENSITIVITY;
-					pitch = pitch.clamp(-90.0, 90.0);
-
-					let rotation_x = Quat::from_rotation_x(-pitch.to_radians());
-					let rotation_y = Quat::from_rotation_y(-yaw.to_radians());
-					let _ = pointer
-						.set_local_transform(Transform::from_rotation(rotation_y * rotation_x));
-				}
-				MouseEvent::Button { button, pressed } => {
-					if button > 255 {
-						if pressed {
-							mouse_buttons.insert(button);
-						} else {
-							mouse_buttons.remove(&button);
-						}
-					}
-					pointer_datamap.raw_input_events.clone_from(&mouse_buttons);
-					match button {
-						BTN_LEFT!() => {
-							pointer_datamap.select = pressed as u32 as f32;
-						}
-						BTN_MIDDLE!() => {
-							pointer_datamap.middle = pressed as u32 as f32;
-						}
-						BTN_RIGHT!() => {
-							pointer_datamap.context = pressed as u32 as f32;
-							pointer_datamap.grab = pressed as u32 as f32;
-						}
-						_ => {}
-					}
-				}
-				MouseEvent::AxisContinuous { a } => {
-					pointer_datamap.scroll_continuous.x += a.x;
-					pointer_datamap.scroll_continuous.y -= a.y;
-				}
-				MouseEvent::AxisDiscrete { a } => {
-					pointer_datamap.scroll_discrete.x += a.x;
-					pointer_datamap.scroll_discrete.y -= a.y;
-				}
-			}
-		}
-		let _ = pointer.update_state(
-			InputDataType::Pointer(Pointer::default()),
-			&Datamap::from_typed(pointer_datamap.clone()).unwrap(),
-		);
-	}
-}
-
-#[derive(Clone, Default)]
-struct MouseTargetState {
-	handlers: FxHashMap<u64, (InputHandler, Field)>,
-	capture_requests: FxHashSet<u64>,
-	release_requests: FxHashSet<u64>,
-	captured: Option<u64>,
-}
-
-async fn input_method_events(
-	frame_event: Arc<Notify>,
-	pointer: InputMethod,
-	state_tx: watch::Sender<MouseTargetState>,
-) {
-	loop {
-		frame_event.notified().await;
-
-		state_tx.send_modify(|state| {
-			while let Some(event) = pointer.recv_input_method_event() {
-				match event {
-					InputMethodEvent::CreateHandler { handler, field } => {
-						// println!("new handler {}!!", handler.id());
-						state.handlers.insert(handler.id(), (handler, field));
-					}
-					InputMethodEvent::RequestCaptureHandler { id } => {
-						// println!("handler {id} requests capture!!");
-						state.capture_requests.insert(id);
-						state.release_requests.remove(&id);
-					}
-					InputMethodEvent::ReleaseHandler { id } => {
-						// println!("handler {id} releases capture!!");
-						state.capture_requests.remove(&id);
-						state.release_requests.insert(id);
-					}
-					InputMethodEvent::DestroyHandler { id } => {
-						// println!("handler {id} deleted!!");
-						state.handlers.remove(&id);
-					}
-				}
-			}
-		});
-	}
-}
-
-async fn input_method_loop(
-	frame_event: Arc<Notify>,
-	state_rx: watch::Receiver<MouseTargetState>,
-	pointer: InputMethod,
-	pointer_reticle: Lines,
-) {
-	loop {
-		frame_event.notified().await;
-
-		let mut state = state_rx.borrow().clone();
-
-		if let Some(captured_id) = state.captured {
-			if state.release_requests.contains(&captured_id) {
-				state.captured = None;
-			}
-		}
-		// TODO: make this proper instead of just picking the first thing that wants capture
-		if state.captured.is_none() {
-			state.captured = state.capture_requests.drain().next();
-		}
-		let line = circle(8, 0.0, 0.001).thickness(0.0025);
-		if let Some((captured, _)) = state.captured.and_then(|id| state.handlers.get(&id)) {
-			pointer
-				.set_handler_order(slice::from_ref(captured))
-				.unwrap();
-			pointer.set_captures(slice::from_ref(captured)).unwrap();
-			// Change reticle color to green when captured
-			pointer_reticle
-				.set_lines(&[line.color(rgba_linear!(0.0, 1.0, 0.0, 1.0))])
-				.unwrap();
-			continue;
-		}
-		// Reset to white color when not captured
-		pointer_reticle.set_lines(&[line]).unwrap();
-		let _ = pointer.set_captures(&[]);
-
-		let mut join = JoinSet::new();
-		for (handler, field) in state.handlers.values() {
-			let handler = handler.clone();
-			let field = field.clone();
-			let pointer = pointer.clone();
-			join.spawn(async move {
-				(
-					handler,
-					field.ray_march(&pointer, [0.0; 3], [0.0, 0.0, -1.0]).await,
-				)
-			});
-		}
-
-		let mut handlers: Vec<(InputHandler, RayMarchResult)> = Vec::new();
-		while let Some(res) = join.join_next().await {
-			let Ok((handler, Ok(ray_info))) = res else {
-				continue;
-			};
-			if ray_info.min_distance > 0.0 {
+		let info = match frames.recv().await {
+			Ok(info) => info,
+			Err(RecvError::Lagged(n)) => {
+				warn!("lost {n} frame events");
 				continue;
 			}
-			if ray_info.deepest_point_distance < 0.01 {
-				continue;
-			}
-			handlers.push((handler, ray_info));
-		}
-		let closest_hits = handlers
-			.into_iter()
-			.map(|(a, b)| (vec![a], b))
-			// now collect all handlers that are same distance if they're the closest
-			.reduce(|(mut handlers_a, result_a), (handlers_b, result_b)| {
-				if (result_a.deepest_point_distance - result_b.deepest_point_distance).abs() < 0.001
-				{
-					// distance is basically the same
-					handlers_a.extend(handlers_b);
-					(handlers_a, result_a)
-				} else if result_a.deepest_point_distance < result_b.deepest_point_distance {
-					(handlers_a, result_a)
-				} else {
-					(handlers_b, result_b)
-				}
-			});
+			Err(RecvError::Closed) => break,
+		};
 
-		if let Some((hit_handlers, hit_info)) = closest_hits {
-			let _ = pointer.set_handler_order(hit_handlers.as_slice());
-			let _ = pointer_reticle.set_relative_transform(
-				&pointer,
-				Transform::from_translation(
-					Vec3::from(hit_info.ray_origin)
-						+ Vec3::from(hit_info.ray_direction)
-							* hit_info.deepest_point_distance
-							* 0.95,
-				),
-			);
-		} else {
-			let _ = pointer.set_handler_order(&[]);
-			let _ = pointer_reticle
-				.set_relative_transform(&pointer, Transform::from_translation([0.0, 0.0, -0.5]));
+		// translation only, so the pointer rides along with the head without turning with it
+		let _ = method
+			.spatial
+			.set_relative_transform(hmd.clone(), PartialTransform::from_translation([0.0; 3]));
+
+		method.send(info.predicted_display_time).await;
+		method.end_frame();
+
+		let now_captured = method.active_capture().await.is_some();
+		if now_captured != captured {
+			captured = now_captured;
+			let _ = reticle_lines.set_lines(reticle(if captured { CAPTURED } else { IDLE }));
+		}
+
+		// sit just short of the deepest point so the reticle reads as on top of what it's over
+		let now_distance = hits(&*method.cache().handlers().await)
+			.first()
+			.map_or(RETICLE_REST, |(d, _)| d * 0.95);
+		if now_distance != distance {
+			distance = now_distance;
+			let _ = reticle_spatial
+				.set_local_transform(PartialTransform::from_translation([0.0, 0.0, -distance]));
 		}
 	}
 }
 
-// Keyboard events are now handled directly by spatial_input_beam
 async fn input_loop(
-	client: Arc<ClientHandle>,
-	keyboard_tx: mpsc::UnboundedSender<KeyboardEvent>,
-	mouse_tx: mpsc::UnboundedSender<MouseEvent>,
+	keymap_store: KeymapStore,
+	pointer: Arc<InputMethod<MousePointer>>,
+	keyboard_beam: Arc<SpatialInputBeam<KeyboardHandler>>,
 ) {
 	let mut keymap = None;
 
@@ -412,64 +322,54 @@ async fn input_loop(
 	{
 		match message {
 			ipc::Message::Keymap(map) => {
-				info!("IPC keymap message");
-				let Ok(new_keymap_id) = client.register_xkb_keymap(map).await else {
+				let Some(Ok(new_keymap)) = keymap_store
+					.exchange_string(&map)
+					.await
+					.map(|v| v.inspect_err(|err| tracing::error!("failed keymap exchange: {err}")))
+				else {
+					warn!("failed keymap exchange");
 					continue;
 				};
-				keymap = Some(new_keymap_id);
-				let _ = keyboard_tx.send(KeyboardEvent::KeyMap(new_keymap_id));
+				keymap = Some(new_keymap);
 			}
-			ipc::Message::Key { keycode, pressed } => {
-				let Some(map) = keymap else {
+			ipc::Message::Key {
+				keycode,
+				pressed,
+				mod_pressed,
+				mod_latched,
+				mod_locked,
+				layout_group,
+			} => {
+				let Some(keymap) = keymap.clone() else {
+					warn!("no keymap");
 					continue;
 				};
-				let _ = keyboard_tx.send(KeyboardEvent::Key {
-					map,
-					key: keycode,
-					pressed,
-				});
+				let Some(handler) = keyboard_beam.get_handler().await else {
+					continue;
+				};
+				let _ = handler
+					.key(
+						KeyEvent {
+							keycode,
+							pressed,
+							modifiers: ModifierState {
+								depressed: mod_pressed,
+								latched: mod_latched,
+								locked: mod_locked,
+								layout_group,
+							},
+							keymap,
+						},
+						None,
+					)
+					.instrument(debug_span!("sending keypress"));
 			}
-			ipc::Message::MouseMove(delta) => {
-				let _ = mouse_tx.send(MouseEvent::Move { delta });
-			}
-			ipc::Message::MouseButton { button, pressed } => {
-				let _ = mouse_tx.send(MouseEvent::Button { button, pressed });
-			}
-			ipc::Message::MouseAxisContinuous(a) => {
-				let _ = mouse_tx.send(MouseEvent::AxisContinuous { a });
-			}
-			ipc::Message::MouseAxisDiscrete(a) => {
-				let _ = mouse_tx.send(MouseEvent::AxisDiscrete { a });
-			}
+			ipc::Message::MouseMove(delta) => pointer.look(delta),
+			ipc::Message::MouseButton { button, pressed } => pointer.button(button, pressed),
+			ipc::Message::MouseAxisContinuous(a, _) => pointer.scroll(Some(a), None),
+			ipc::Message::MouseAxisDiscrete(a, _) => pointer.scroll(None, Some(a)),
 			ipc::Message::ResetInput => {}
 			ipc::Message::Disconnect => break,
-		}
-	}
-}
-
-async fn handle_frame_events(
-	frame_handle: Arc<Notify>,
-	client_handle: Arc<ClientHandle>,
-	async_event_handle: AsyncEventHandle,
-	pointer: InputMethod,
-	hmd: SpatialRef,
-	frame_count_tx: watch::Sender<u32>,
-) {
-	loop {
-		async_event_handle.wait().await;
-		match client_handle.get_root().recv_root_event() {
-			Some(RootEvent::Frame { info: _ }) => {
-				frame_count_tx.send_modify(|i| *i += 1);
-				let _ = pointer.set_relative_transform(&hmd, Transform::from_translation([0.0; 3]));
-				frame_handle.notify_waiters();
-			}
-			Some(RootEvent::Ping { response }) => {
-				response.send_ok(());
-			}
-			Some(RootEvent::SaveState { response }) => {
-				response.send(ClientState::from_root(client_handle.get_root()));
-			}
-			None => {}
 		}
 	}
 }

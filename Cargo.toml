@@ -1,13 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-	#"azimuth",
+	"azimuth",
 	"display",
 	"eclipse",
 	"ipc",
 	"manifold",
 	"simular",
-	"spatializer",
 ]
 
 [workspace.dependencies]

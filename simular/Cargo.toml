@@ -13,7 +13,6 @@ color-eyre = "0.6.2"
 glam = "0.30.0"
 mint = "0.5.9"
 ipc = { path = "../ipc" }
-spatializer = { path = "../spatializer" }
 console-subscriber = { version = "0.2.0", optional = true }
 parking_lot = "0.12.1"
 rustc-hash = "1.1.0"

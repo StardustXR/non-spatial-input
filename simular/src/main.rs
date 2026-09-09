@@ -1,7 +1,6 @@
 use color_eyre::Result;
 use gluon::{Interface, Liveness};
 use ipc::receive_input_async_ipc;
-use spatializer::SpatialInputBeam;
 use stardust_xr_fusion::{
 	client::Client,
 	keymap::{KeymapStore, KeymapStoreExt},
@@ -13,6 +12,7 @@ use stardust_xr_molecules::{
 		ModifierState,
 	},
 	mouse_handler::{protocol::MouseHandler, ScrollSource},
+	spatial_input_beam::SpatialInputBeam,
 };
 use std::{io::IsTerminal, sync::Arc};
 use tracing::{debug_span, Instrument};
