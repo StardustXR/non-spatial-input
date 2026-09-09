@@ -37,6 +37,12 @@ use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter};
 
 const MOUSE_SENSITIVITY: f32 = 0.1;
 const RETICLE_REST: f32 = 0.5;
+/// how far off a field the beam still reports, which is the range the reticle blends over
+const BEAM_MARGIN: f32 = 0.1;
+/// sit just short of the deepest point so the reticle reads as on top of what it's over
+const RETICLE_LIFT: f32 = 0.95;
+/// how sharply a near miss loses its pull as it slides out to the margin
+const FALLOFF: i32 = 2;
 const IDLE: Color = rgba_linear!(1.0, 1.0, 1.0, 1.0);
 const CAPTURED: Color = rgba_linear!(0.0, 1.0, 0.0, 1.0);
 
@@ -168,6 +174,35 @@ fn hits(
 	hits
 }
 
+/// where the reticle wants to sit down the beam
+///
+/// landing on something locks it to that depth. Short of that, everything inside the margin
+/// pulls it toward its own depth by how near the beam comes, so it drifts onto what you're
+/// closing in on rather than hanging at rest until you're already on top of it
+fn reticle_depth(handlers: &HashMap<QueryableId, CachedHandler<RayMarchResult>>) -> f32 {
+	if let Some((depth, _)) = hits(handlers).first() {
+		return depth * RETICLE_LIFT;
+	}
+
+	let mut weight = 0.0;
+	let mut weighted_depth = 0.0;
+	for entry in handlers.values().filter(|e| e.spatial.is_some()) {
+		// falls to zero at the margin rather than merely getting small, so nothing pops into
+		// the average the instant the query picks it up
+		let w = (1.0 - entry.value.min_distance / BEAM_MARGIN)
+			.clamp(0.0, 1.0)
+			.powi(FALLOFF);
+		weight += w;
+		weighted_depth += w * entry.value.deepest_point_distance;
+	}
+	if weight == 0.0 {
+		return RETICLE_REST;
+	}
+
+	let blended = weighted_depth / weight * RETICLE_LIFT;
+	RETICLE_REST + (blended - RETICLE_REST) * weight.min(1.0)
+}
+
 fn closest<'a>(
 	handlers: impl Iterator<Item = &'a CachedHandler<RayMarchResult>>,
 ) -> Option<InputHandler> {
@@ -225,6 +260,7 @@ async fn main() {
 		[0.0; 3].into(),
 		[0.0, 0.0, -1.0].into(),
 		f32::INFINITY,
+		BEAM_MARGIN,
 	)
 	.await
 	.unwrap();
@@ -235,6 +271,8 @@ async fn main() {
 		|_, v| Some(KeyboardHandler::from_ref(v)),
 		KeyboardHandler::ID.into(),
 		f32::INFINITY,
+		// keys go to whatever the beam is truly on, no near-miss fuzz
+		0.0,
 	)
 	.await
 	.unwrap();
@@ -297,10 +335,7 @@ async fn frame_loop(
 			let _ = reticle_lines.set_lines(reticle(if captured { CAPTURED } else { IDLE }));
 		}
 
-		// sit just short of the deepest point so the reticle reads as on top of what it's over
-		let now_distance = hits(&*method.cache().handlers().await)
-			.first()
-			.map_or(RETICLE_REST, |(d, _)| d * 0.95);
+		let now_distance = reticle_depth(&*method.cache().handlers().await);
 		if now_distance != distance {
 			distance = now_distance;
 			let _ = reticle_spatial

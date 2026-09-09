@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
 		|_, v| Some(KeyboardHandler::from_ref(v)),
 		KeyboardHandler::ID.into(),
 		f32::INFINITY,
+		0.0,
 	)
 	.await
 	.unwrap();
@@ -54,6 +55,7 @@ async fn main() -> Result<()> {
 		|_, v| Some(MouseHandler::from_ref(v)),
 		MouseHandler::ID.into(),
 		f32::INFINITY,
+		0.0,
 	)
 	.await
 	.unwrap();
