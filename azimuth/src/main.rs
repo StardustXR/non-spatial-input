@@ -32,7 +32,7 @@ use std::{
 	sync::Arc,
 };
 use tokio::sync::broadcast::{self, error::RecvError};
-use tracing::{debug_span, warn, Instrument};
+use tracing::{debug, debug_span, warn, Instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter};
 
 const MOUSE_SENSITIVITY: f32 = 0.1;
@@ -73,6 +73,12 @@ impl MousePointer {
 		let mut state = self.state.lock();
 		state.yaw += delta.x * MOUSE_SENSITIVITY;
 		state.pitch = (state.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-90.0, 90.0);
+	}
+
+	/// every write to this spatial re-runs both beam queries server side, so aim once a frame
+	/// rather than once per mouse event, input only goes out per frame anyway
+	fn aim(&self) {
+		let state = self.state.lock();
 		let rotation = Quat::from_rotation_y(-state.yaw.to_radians())
 			* Quat::from_rotation_x(-state.pitch.to_radians());
 		drop(state);
@@ -325,6 +331,7 @@ async fn frame_loop(
 		let _ = method
 			.spatial
 			.set_relative_transform(hmd.clone(), PartialTransform::from_translation([0.0; 3]));
+		method.aim();
 
 		method.send(info.predicted_display_time).await;
 		method.end_frame();
@@ -380,6 +387,7 @@ async fn input_loop(
 					continue;
 				};
 				let Some(handler) = keyboard_beam.get_handler().await else {
+					debug!("dropped key {keycode}, beam is on no keyboard handler");
 					continue;
 				};
 				let _ = handler
