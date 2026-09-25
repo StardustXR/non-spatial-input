@@ -1,10 +1,7 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    crane = {
-      inputs.nixpkgs.follows = "nixpkgs";
-      url = "github:ipetkov/crane";
-    };
+    crane.url = "github:ipetkov/crane";
   };
 
 
@@ -13,19 +10,21 @@
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
       nixpkgsFor = forAllSystems (system: import nixpkgs { inherit system; });
   in {
-    packages = forAllSystems (system: let pkgs = nixpkgsFor.${system}; in {
-      default = crane.lib.${system}.buildPackage {
+      packages = forAllSystems (system: let pkgs = nixpkgsFor.${system}; craneLib = crane.mkLib pkgs; in {
+      default = craneLib.buildPackage {
         pname = "non-spatial-input";
         version = "0.1.0";
         src = ./.;
+        cargoLock = ./Cargo.lock;
+
         buildInputs = with pkgs; [
           # inputs
           pkg-config
           libxkbcommon
-          
+
           # eclipse
           libinput
-          
+
           # manifold
           libGL
           xorg.libX11
@@ -43,10 +42,10 @@
           # inputs
           pkg-config
           libxkbcommon
-          
+
           # eclipse
           libinput
-          
+
           # manifold
           libGL
           xorg.libX11
@@ -55,7 +54,7 @@
           xorg.libXi
           wayland
         ]);
-        LD_LIBRARY_PATH = "${nixpkgs.lib.makeLibraryPath buildInputs}";        
+        LD_LIBRARY_PATH = "${nixpkgs.lib.makeLibraryPath buildInputs}";
       };
     });
   };
