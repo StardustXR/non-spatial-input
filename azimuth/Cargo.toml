@@ -1,12 +1,12 @@
 [package]
 name = "azimuth"
-version = "0.51.0"
+version = "0.53.0-rc.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-glam = "0.30.0"
+glam = "0.33.0"
 input-event-codes = "5.16.8"
 ipc = { path = "../ipc" }
 parking_lot = "0.12.1"
@@ -14,7 +14,7 @@ parking_lot = "0.12.1"
 tokio = { workspace = true }
 stardust-xr-fusion = { workspace = true }
 stardust-xr-molecules = { workspace = true }
-gluon.workspace = true
+gluon-ipc.workspace = true
 
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 tracing = "0.1.40"

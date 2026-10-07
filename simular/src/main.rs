@@ -1,5 +1,5 @@
 use color_eyre::Result;
-use gluon::{Interface, Liveness};
+use gluon_ipc::{Interface, Liveness};
 use ipc::receive_input_async_ipc;
 use stardust_xr_fusion::{
 	client::Client,
