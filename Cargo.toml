@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["azimuth", "display", "eclipse", "ipc", "manifold", "simular"]
+# metadata for the nix flake
+metadata.crane.name = "non-spatial-input"
+
+[workspace.package]
+version = "0.53.0-rc.1"
+edition = "2024"
 
 [workspace.dependencies]
 serde = { version = "1.0.163", features = ["serde_derive"] }
