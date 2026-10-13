@@ -40,10 +40,10 @@
 
               # manifold
               libGL
-              xorg.libX11
-              xorg.libXcursor
-              xorg.libXrandr
-              xorg.libXi
+              libx11
+              libxcursor
+              libxrandr
+              libxi
               wayland
             ];
 
@@ -79,10 +79,10 @@
 
                 # manifold
                 libGL
-                xorg.libX11
-                xorg.libXcursor
-                xorg.libXrandr
-                xorg.libXi
+                libx11
+                libxcursor
+                libxrandr
+                libxi
                 wayland
               ]
             );
